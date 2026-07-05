@@ -452,4 +452,3 @@ fn detect_kicad_from_registry() -> Option<PathBuf> {
 
     None
 }
-
