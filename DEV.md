@@ -30,7 +30,7 @@ Konnect/
 │   │       ├── config.rs            # TOML + JSON config, socket path auto-detection
 │   │       └── transport/
 │   │           ├── stdio.rs         # Line-by-line JSON-RPC over stdin/stdout (default)
-│   │           └── http.rs          # Axum POST /mcp + SSE at /mcp/sse (transport = "http" / "both")
+│   │           └── http.rs          # Streamable HTTP: POST + GET (SSE) on /mcp (transport = "http" / "both")
 │   │
 │   ├── konnect-core/          # All tool logic (17 toolsets)
 │   │   └── src/

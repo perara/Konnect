@@ -31,5 +31,6 @@ Opening an issue is the best way to influence priority.
 
 ## Done
 
-- ~~HTTP transport~~ — available now via `transport = "http"` (or `"both"`) with
-  POST `/mcp`, SSE notifications at `/mcp/sse`, and a `/health` endpoint.
+- ~~HTTP transport~~ — Streamable HTTP (MCP spec 2025-06-18) available via
+  `transport = "http"` (or `"both"`): POST + GET (SSE) on a single `/mcp`
+  endpoint, Origin validation, and a `/health` probe.
