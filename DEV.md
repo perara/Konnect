@@ -77,7 +77,6 @@ Konnect/
 │   │       ├── gen.rs                # Generated protobuf Rust types
 │   │       ├── client.rs             # NNG req/rep client, all methods implemented
 │   │       ├── builders.rs           # Protobuf message construction helpers (mm→nm conversion)
-│   │       ├── board.rs              # Transaction helpers (with_commit)
 │   │       └── types.rs              # Public types (IpcFootprint, IpcTrack, etc.)
 │   │
 │   └── schematic-viewer/            # Tauri desktop app (separate from workspace)

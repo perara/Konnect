@@ -26,14 +26,6 @@ pub struct IpcTrack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IpcVia {
-    pub net_name: String,
-    pub position: IpcVector2,
-    pub drill: f64,
-    pub pad_size: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcNet {
     pub name: String,
     pub netcode: i32,
