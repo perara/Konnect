@@ -126,13 +126,4 @@ pub const HOOK_SKILLS: &[HookSkillManifest] = &[
         tool_matcher: "mcp__konnect__(place_component|move_component|rotate_component|route_trace|add_via|route_differential_pair|route_pad_to_pad|refill_zones)",
         event: "PreToolUse",
     },
-    HookSkillManifest {
-        name: "post-sync-board",
-        content: "Board synced from schematic. Next steps:\n\
-                  1. Run `get_drc_violations` to check for new rule violations from the sync\n\
-                  2. Check that all footprints are placed (new components land at origin)\n\
-                  3. Consider running `refill_zones` if copper pours exist",
-        tool_matcher: "mcp__konnect__sync_schematic_to_board",
-        event: "PostToolUse",
-    },
 ];

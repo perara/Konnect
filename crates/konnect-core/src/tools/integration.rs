@@ -10,8 +10,6 @@ use crate::tools::{get_path, require_str, ToolContext, ToolDef};
 use serde_json::json;
 use std::path::PathBuf;
 
-use super::cli;
-
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
 pub fn tools() -> Vec<ToolDef> {
@@ -122,32 +120,6 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": ["board"]
             }),
             |args, ctx| async move { handle_autoroute(args, ctx).await }
-        ),
-        tool!(
-            "export_dsn",
-            "Export the PCB as a Specctra DSN file for use with an external autorouter.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "board": { "type": "string", "description": "Path to .kicad_pcb file" },
-                    "output": { "type": "string", "description": "Output .dsn file path" }
-                },
-                "required": ["board", "output"]
-            }),
-            |args, ctx| async move { handle_export_dsn(args, ctx).await }
-        ),
-        tool!(
-            "import_ses",
-            "Import a Specctra SES (session) file produced by an autorouter back into the PCB using kicad-cli.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "board": { "type": "string", "description": "Path to .kicad_pcb file" },
-                    "ses_path": { "type": "string", "description": "Path to the .ses file to import" }
-                },
-                "required": ["board", "ses_path"]
-            }),
-            |args, ctx| async move { handle_import_ses(args, ctx).await }
         ),
         tool!(
             "check_freerouting",
@@ -634,116 +606,16 @@ fn find_freerouting_jar(args: &serde_json::Value) -> Option<PathBuf> {
 }
 
 async fn handle_autoroute(
-    args: &serde_json::Value,
-    ctx: &ToolContext,
+    _args: &serde_json::Value,
+    _ctx: &ToolContext,
 ) -> anyhow::Result<CallToolResult> {
-    let board = get_path(args, "board")?;
-    let passes = args["passes"].as_u64().unwrap_or(3);
-    let timeout_secs = args["timeout_seconds"].as_u64().unwrap_or(120);
-
-    let jar = match find_freerouting_jar(args) {
-        Some(j) => j,
-        None => {
-            return Ok(CallToolResult::error(
-                "Freerouting JAR not found. Provide jar_path or install freerouting.jar. \
-                 Download from https://github.com/freerouting/freerouting/releases",
-            ));
-        }
-    };
-
-    let cli = &ctx.config.kicad_cli;
-
-    // Step 1: Export DSN
-    let dsn_path = board.with_extension("dsn");
-    cli::export_dsn(cli, &board, &dsn_path).await?;
-
-    // Step 2: Run Freerouting
-    let ses_path = board.with_extension("ses");
-    let status = tokio::process::Command::new("java")
-        .args([
-            "-jar",
-            jar.to_str().unwrap_or(""),
-            "-design",
-            dsn_path.to_str().unwrap_or(""),
-            "-session_file",
-            ses_path.to_str().unwrap_or(""),
-            "-pass_limit",
-            &passes.to_string(),
-        ])
-        .status();
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), status).await;
-
-    match result {
-        Ok(Ok(status)) if status.success() => {
-            // Step 3: Import SES if produced
-            if ses_path.exists() {
-                cli::import_ses(cli, &board, &ses_path).await?;
-                Ok(CallToolResult::text(
-                    serde_json::to_string_pretty(&json!({
-                        "success": true,
-                        "passes": passes,
-                        "ses_file": ses_path.to_str().unwrap_or(""),
-                        "note": "SES imported back into PCB"
-                    }))
-                    .unwrap(),
-                ))
-            } else {
-                Ok(CallToolResult::error(
-                    "Freerouting completed but no SES file produced",
-                ))
-            }
-        }
-        Ok(Ok(status)) => Ok(CallToolResult::error(format!(
-            "Freerouting exited with code {}",
-            status.code().unwrap_or(-1)
-        ))),
-        Ok(Err(e)) => Ok(CallToolResult::error(format!(
-            "Failed to run Freerouting: {e}"
-        ))),
-        Err(_) => Ok(CallToolResult::error(format!(
-            "Freerouting timed out after {} seconds",
-            timeout_secs
-        ))),
-    }
-}
-
-async fn handle_export_dsn(
-    args: &serde_json::Value,
-    ctx: &ToolContext,
-) -> anyhow::Result<CallToolResult> {
-    let board = get_path(args, "board")?;
-    let output = get_path(args, "output")?;
-
-    let cli = &ctx.config.kicad_cli;
-    cli::export_dsn(cli, &board, &output).await?;
-
-    Ok(CallToolResult::text(
-        serde_json::to_string_pretty(&json!({
-            "success": true,
-            "output": output.to_str().unwrap_or("")
-        }))
-        .unwrap(),
-    ))
-}
-
-async fn handle_import_ses(
-    args: &serde_json::Value,
-    ctx: &ToolContext,
-) -> anyhow::Result<CallToolResult> {
-    let board = get_path(args, "board")?;
-    let ses_path = get_path(args, "ses_path")?;
-
-    let cli = &ctx.config.kicad_cli;
-    cli::import_ses(cli, &board, &ses_path).await?;
-
-    Ok(CallToolResult::text(
-        serde_json::to_string_pretty(&json!({
-            "success": true,
-            "board": board.to_str().unwrap_or(""),
-            "ses": ses_path.to_str().unwrap_or("")
-        }))
-        .unwrap(),
+    // ponytail: Freerouting workflow requires Specctra DSN export + SES import,
+    // both of which were removed from kicad-cli in KiCAD 10. The tool stays in the
+    // registry so callers get a clear error; remove entirely once IPC round-trip lands.
+    Ok(CallToolResult::error(
+        "Autoroute via Freerouting is not available: kicad-cli in KiCAD 10 no longer \
+         supports Specctra DSN export or SES import. Use KiCAD's PCB editor \
+         (File > Export > Specctra DSN, then File > Import > Specctra Session) manually.",
     ))
 }
 

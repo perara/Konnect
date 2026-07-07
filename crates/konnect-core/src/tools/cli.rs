@@ -448,40 +448,6 @@ pub async fn export_ipcd356(cli: &str, pcb: &Path, output: &Path) -> Result<()> 
     Ok(())
 }
 
-// ─── Specctra DSN/SES ────────────────────────────────────────────────────────
-//
-// NOTE: KiCAD 10 CLI does NOT have `pcb export specctra` or `pcb import specctra`.
-// DSN/SES support was removed from the CLI. The Freerouting workflow is no longer
-// supported via kicad-cli in v10. These functions return clear errors.
-
-/// Specctra DSN export is NOT available in KiCAD 10 CLI.
-pub async fn export_dsn(_cli: &str, _pcb: &Path, _output: &Path) -> Result<()> {
-    anyhow::bail!(
-        "Specctra DSN export is not available in kicad-cli for KiCAD 10. \
-         DSN export was removed from the CLI. Use KiCAD's PCB editor \
-         (File > Export > Specctra DSN) or the IPC API when available."
-    )
-}
-
-/// Specctra SES import is NOT available in KiCAD 10 CLI.
-pub async fn import_ses(_cli: &str, _pcb: &Path, _ses: &Path) -> Result<()> {
-    anyhow::bail!(
-        "Specctra SES import is not available in kicad-cli for KiCAD 10. \
-         Use KiCAD's PCB editor (File > Import > Specctra Session) manually."
-    )
-}
-
-// ─── Sync (removed in v10) ───────────────────────────────────────────────────
-
-/// Schematic-to-board sync is NOT available as a kicad-cli command in KiCAD 10.
-pub async fn sync_schematic_to_board(_cli: &str, _schematic: &Path) -> Result<()> {
-    anyhow::bail!(
-        "kicad-cli 'pcb sync' is not available in KiCAD 10. \
-         To update the PCB from the schematic, open both files in KiCAD and use \
-         Tools > Update PCB from Schematic in the PCB editor."
-    )
-}
-
 // ─── Render to image ─────────────────────────────────────────────────────────
 
 /// Render schematic to SVG (no bitmap export in KiCAD 10 CLI).

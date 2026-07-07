@@ -120,21 +120,6 @@ pub fn tools() -> Vec<ToolDef> {
             }),
             |args, ctx| async move { handle_fix_connectivity(args, ctx).await }
         ),
-        tool!(
-            "sync_schematic_to_board",
-            "Push schematic netlist changes to the PCB file (update footprint assignments \
-             and net names) using kicad-cli.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "schematic": { "type": "string", "description": "Path to .kicad_sch file" },
-                    "board":     { "type": "string", "description": "Path to .kicad_pcb file" },
-                    "dry_run":   { "type": "boolean", "description": "Preview changes without writing", "default": false }
-                },
-                "required": ["schematic", "board"]
-            }),
-            |args, ctx| async move { handle_sync_to_board(args, ctx).await }
-        ),
     ]
 }
 
@@ -444,48 +429,5 @@ async fn handle_fix_connectivity(
         "applied": !dry_run && !fixes.is_empty(),
         "dry_run": dry_run,
         "fixes": fixes
-    })))
-}
-
-async fn handle_sync_to_board(
-    args: &serde_json::Value,
-    ctx: &ToolContext,
-) -> anyhow::Result<CallToolResult> {
-    let sch_path = get_path(args, "schematic")?;
-    let board_path = get_path(args, "board")?;
-    let dry_run = args["dry_run"].as_bool().unwrap_or(false);
-
-    if dry_run {
-        // Validate both files exist and parse the schematic to report what would change
-        if !sch_path.exists() {
-            return Ok(CallToolResult::error(format!(
-                "Schematic not found: {}",
-                sch_path.display()
-            )));
-        }
-        if !board_path.exists() {
-            return Ok(CallToolResult::error(format!(
-                "Board not found: {}",
-                board_path.display()
-            )));
-        }
-        let (_, tree) = read_schematic(&sch_path)?;
-        let instances = extract_symbol_instances(&tree);
-        return Ok(CallToolResult::json(&json!({
-            "dry_run": true,
-            "schematic": sch_path.display().to_string(),
-            "board": board_path.display().to_string(),
-            "component_count": instances.len(),
-            "message": "Dry-run: would sync these components to the board."
-        })));
-    }
-
-    // Run kicad-cli pcb sync
-    cli::sync_schematic_to_board(&ctx.config.kicad_cli, &sch_path).await?;
-
-    Ok(CallToolResult::json(&json!({
-        "synced": true,
-        "schematic": sch_path.display().to_string(),
-        "board": board_path.display().to_string()
     })))
 }

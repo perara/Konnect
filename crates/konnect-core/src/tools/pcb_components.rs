@@ -348,7 +348,7 @@ async fn handle_edit_component(
         "reference": fp.reference,
         "value": fp.value,
         "footprint": fp.footprint,
-        "note": "Field edits via IPC are not yet supported. Use edit_schematic_component + sync_schematic_to_board."
+        "note": "Field edits via IPC are not yet supported. Edit in the schematic (edit_schematic_component), then open the PCB in KiCAD and run Tools > Update PCB from Schematic."
     })))
 }
 

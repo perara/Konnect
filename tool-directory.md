@@ -144,8 +144,8 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `validate_wire_connections` | Check all wire endpoints for floating ends not connected to a pin, label, or another wire. |
 | `validate_component_connections` | Check that every non-passive pin has at least one wire or label connected. Reports unconnected pins. |
 
-### `sch_export` · 7 tools
-**Purpose:** Export schematic to SVG/PDF/netlist, run ERC, sync to board.
+### `sch_export` · 6 tools
+**Purpose:** Export schematic to SVG/PDF/netlist, run ERC.
 **Source:** [`crates/konnect-core/src/tools/sch_export.rs`](crates/konnect-core/src/tools/sch_export.rs)
 
 | Tool | Description |
@@ -156,7 +156,6 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `export_netlist_summary` | Return a human-readable JSON netlist summary (components, nets, pin counts). Does not require kicad-cli. |
 | `run_erc` | Run the Electrical Rules Check via kicad-cli and return violations filtered by severity. |
 | `fix_connectivity` | Scan for near-miss wire endpoints within `snap_tolerance` of a pin/label and snap them into place. Supports `dry_run`. |
-| `sync_schematic_to_board` | Push schematic netlist changes to the PCB file (footprint assignments, net names) using kicad-cli. |
 
 ---
 
@@ -263,7 +262,7 @@ Six tools, grouped into *discovery/routing* and *observability*.
 
 ## Integration
 
-### `integration` · 11 tools
+### `integration` · 9 tools
 **Purpose:** JLCPCB parts database, Freerouting autoroute, datasheet URLs.
 **Source:** [`crates/konnect-core/src/tools/integration.rs`](crates/konnect-core/src/tools/integration.rs)
 
@@ -277,8 +276,6 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `enrich_datasheets` | Fetch and cache datasheet URLs for all components in a schematic (LCSC API). |
 | `get_datasheet_url` | Retrieve the datasheet URL for a component by MPN or LCSC ID. |
 | `autoroute` | Run Freerouting autorouter: export DSN → autoroute → import SES result. |
-| `export_dsn` | Export the PCB as a Specctra DSN file for external autorouters. |
-| `import_ses` | Import a Specctra SES session file produced by an autorouter. |
 | `check_freerouting` | Verify that the Freerouting JAR is available and return its version. |
 
 ---

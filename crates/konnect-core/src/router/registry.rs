@@ -50,9 +50,9 @@ pub static ALL_TOOLSETS: &[ToolsetMeta] = &[
     },
     ToolsetMeta {
         name: "sch_export",
-        description: "Export schematic to SVG/PDF/netlist, run ERC, sync to board",
+        description: "Export schematic to SVG/PDF/netlist, run ERC",
         category: "schematic",
-        tool_count: 7,
+        tool_count: 6,
     },
     ToolsetMeta {
         name: "pcb_board",
@@ -88,7 +88,7 @@ pub static ALL_TOOLSETS: &[ToolsetMeta] = &[
         name: "integration",
         description: "JLCPCB parts database, Freerouting autoroute, datasheet URLs",
         category: "integration",
-        tool_count: 11,
+        tool_count: 9,
     },
     ToolsetMeta {
         name: "verification",
