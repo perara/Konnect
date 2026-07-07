@@ -1,31 +1,16 @@
-//! MCP server state machine — tracks initialization and session state.
+//! MCP server session context.
 
 use super::protocol::*;
 use crate::router::ToolRouter;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ServerState {
-    /// Waiting for the client's `initialize` request.
-    Uninitialized,
-    /// `initialize` received, `initialized` notification not yet sent.
-    Initializing,
-    /// Fully initialized; ready to handle requests.
-    Ready,
-}
 
 pub struct McpServerState {
-    pub state: RwLock<ServerState>,
     pub router: Arc<ToolRouter>,
 }
 
 impl McpServerState {
     pub fn new(router: Arc<ToolRouter>) -> Self {
-        McpServerState {
-            state: RwLock::new(ServerState::Uninitialized),
-            router,
-        }
+        McpServerState { router }
     }
 
     pub fn build_initialize_result() -> InitializeResult {
@@ -42,9 +27,5 @@ impl McpServerState {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
         }
-    }
-
-    pub async fn is_ready(&self) -> bool {
-        *self.state.read().await == ServerState::Ready
     }
 }

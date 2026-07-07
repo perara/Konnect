@@ -3,7 +3,7 @@
 
 use super::error::{extract_error_kind, ToolErrorKind};
 use super::protocol::*;
-use super::server::{McpServerState, ServerState};
+use super::server::McpServerState;
 use crate::observability::{
     default_calls_log_path, new_call_id, unix_ms, CallObserver, CallRecord, CallStatus,
 };
@@ -19,7 +19,6 @@ use tracing::{debug, info, warn};
 /// Multiple transports (STDIO + HTTP) share the same handler.
 #[derive(Clone)]
 pub struct McpHandler {
-    state: Arc<McpServerState>,
     ctx: Arc<crate::tools::ToolContext>,
     sse_senders: Arc<RwLock<Vec<mpsc::Sender<Event>>>>,
     observer: CallObserver,
@@ -33,7 +32,6 @@ impl McpHandler {
         // (~2K tokens, not ~23K). The LLM expands on demand via `load_toolset`.
         router.load_starter_kit().await;
 
-        let state = Arc::new(McpServerState::new(router.clone()));
         let observer = CallObserver::new(Some(default_calls_log_path()));
         let ctx = Arc::new(crate::tools::ToolContext::new_with_observer(
             config,
@@ -42,7 +40,6 @@ impl McpHandler {
         ));
 
         Ok(McpHandler {
-            state,
             ctx,
             sse_senders: Arc::new(RwLock::new(Vec::new())),
             observer,
@@ -102,10 +99,7 @@ impl McpHandler {
         match req.method.as_str() {
             // ── Lifecycle ──────────────────────────────────────────────────
             "initialize" => {
-                let mut state = self.state.state.write().await;
-                *state = ServerState::Initializing;
                 let result = McpServerState::build_initialize_result();
-                *state = ServerState::Ready;
                 Ok(Some(serde_json::to_value(result)?))
             }
             "notifications/initialized" => Ok(None),
