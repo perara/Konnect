@@ -20,7 +20,7 @@ static VERSION_CSTR: OnceLock<CString> = OnceLock::new();
 /// `config_path` must be a valid null-terminated UTF-8 C string, or NULL to use defaults.
 #[no_mangle]
 pub unsafe extern "C" fn kicad_plugin_init(config_path: *const c_char) -> c_int {
-    let _config_path_str = if config_path.is_null() {
+    let config_path_str = if config_path.is_null() {
         None
     } else {
         match CStr::from_ptr(config_path).to_str() {
@@ -38,7 +38,10 @@ pub unsafe extern "C" fn kicad_plugin_init(config_path: *const c_char) -> c_int 
         use crate::config::{Config, TransportMode};
         use konnect_core::mcp::handler::McpHandler;
 
-        let config = Config::load().unwrap_or_default();
+        let config = match config_path_str.as_deref() {
+            Some(p) => Config::load_from(std::path::Path::new(p)).unwrap_or_default(),
+            None => Config::load().unwrap_or_default(),
+        };
         let server_config = konnect_core::tools::ServerConfig {
             kicad_cli: config.kicad_cli.clone(),
             kicad_binary: config.kicad_binary.clone(),
