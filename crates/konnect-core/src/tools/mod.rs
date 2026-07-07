@@ -194,18 +194,10 @@ pub fn opt_f64(args: &Value, key: &str) -> Option<f64> {
     args[key].as_f64()
 }
 
-/// Extract a required path string and return it as a PathBuf.
-/// Returns a structured `InvalidArgument` error result if missing.
-pub fn require_path(args: &Value, key: &str) -> Result<std::path::PathBuf, CallToolResult> {
-    let s = require_str(args, key)?;
-    Ok(std::path::PathBuf::from(s))
-}
-
 /// Extract a required path string and return it as a PathBuf, using
 /// `anyhow::Error`. Use this variant with `?` inside handlers that return
 /// `anyhow::Result`. The surrounding dispatch will stringify the error and
-/// surface it as `ToolErrorKind::HandlerError` — fine for now, but prefer
-/// `require_path` when you control the return type.
+/// surface it as `ToolErrorKind::HandlerError`.
 pub fn get_path(args: &Value, key: &str) -> anyhow::Result<std::path::PathBuf> {
     let s = args[key]
         .as_str()
