@@ -111,24 +111,59 @@ fn deep_merge(base: &serde_json::Value, overlay: &serde_json::Value) -> serde_js
 }
 
 /// Set a value at a dot-notation path, e.g. "fab_constraints.fab_house" = "JLCPCB".
-fn set_dot_path(config: &mut serde_json::Value, key_path: &str, value: serde_json::Value) {
+///
+/// Fails with an error (instead of panicking) if a segment of the path already
+/// holds a non-object value, since there is nowhere to insert the child key.
+fn set_dot_path(
+    config: &mut serde_json::Value,
+    key_path: &str,
+    value: serde_json::Value,
+) -> anyhow::Result<()> {
     let parts: Vec<&str> = key_path.split('.').collect();
     let mut current = config;
     for (i, part) in parts.iter().enumerate() {
         if i == parts.len() - 1 {
             // Last part — set the value
-            if let serde_json::Value::Object(map) = current {
-                map.insert(part.to_string(), value);
-            }
-            return;
+            return match current {
+                serde_json::Value::Object(map) => {
+                    map.insert(part.to_string(), value);
+                    Ok(())
+                }
+                other => anyhow::bail!(
+                    "Cannot set '{key_path}': '{}' is not an object (found {})",
+                    parts[..i].join("."),
+                    json_type_name(other)
+                ),
+            };
         }
-        // Navigate into nested object, creating if needed
+        // Navigate into nested object, creating it if missing.
         if !current.get(*part).map(|v| v.is_object()).unwrap_or(false) {
-            if let serde_json::Value::Object(map) = current {
-                map.insert(part.to_string(), json!({}));
+            match current {
+                serde_json::Value::Object(map) => {
+                    map.insert(part.to_string(), json!({}));
+                }
+                other => anyhow::bail!(
+                    "Cannot set '{key_path}': '{}' is not an object (found {})",
+                    parts[..i].join("."),
+                    json_type_name(other)
+                ),
             }
         }
-        current = current.get_mut(*part).unwrap();
+        current = current
+            .get_mut(*part)
+            .expect("just verified or inserted as an object above");
+    }
+    Ok(())
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -287,7 +322,7 @@ async fn handle_save_user_config(
     let path = user_config_path();
     info!(key_path = %key_path, "[BETA] Saving user config");
     let mut config = read_config(&path, default_user_config()).await;
-    set_dot_path(&mut config, &key_path, value.clone());
+    set_dot_path(&mut config, &key_path, value.clone())?;
     write_config(&path, &config).await?;
 
     Ok(CallToolResult::text(
@@ -335,7 +370,7 @@ async fn handle_save_project_config(
 
     let path = project_config_path(&project_dir);
     let mut config = read_config(&path, default_project_config()).await;
-    set_dot_path(&mut config, &key_path, value.clone());
+    set_dot_path(&mut config, &key_path, value.clone())?;
     write_config(&path, &config).await?;
 
     Ok(CallToolResult::text(
@@ -463,4 +498,81 @@ fn resolve_project_dir(args: &serde_json::Value, ctx: &ToolContext) -> anyhow::R
         return Ok(dir.clone());
     }
     anyhow::bail!("No project directory specified. Pass 'project_dir' or configure a default.")
+}
+
+#[cfg(test)]
+mod dot_path_and_merge_tests {
+    use super::*;
+
+    #[test]
+    fn deep_merge_overlays_nested_object_keys() {
+        let base = json!({
+            "fab_constraints": { "fab_house": "JLCPCB", "layer_count": 2 },
+            "design_rules": []
+        });
+        let overlay = json!({
+            "fab_constraints": { "layer_count": 4 }
+        });
+
+        let merged = deep_merge(&base, &overlay);
+
+        assert_eq!(merged["fab_constraints"]["fab_house"], "JLCPCB");
+        assert_eq!(merged["fab_constraints"]["layer_count"], 4);
+        assert_eq!(merged["design_rules"], json!([]));
+    }
+
+    #[test]
+    fn deep_merge_null_overlay_value_keeps_base() {
+        let base = json!({ "fab_house": "JLCPCB" });
+        let overlay = json!({ "fab_house": null });
+
+        let merged = deep_merge(&base, &overlay);
+
+        assert_eq!(merged["fab_house"], "JLCPCB");
+    }
+
+    #[test]
+    fn set_dot_path_sets_top_level_key() {
+        let mut config = json!({});
+        set_dot_path(&mut config, "fab_house", json!("JLCPCB")).expect("should succeed");
+        assert_eq!(config["fab_house"], "JLCPCB");
+    }
+
+    #[test]
+    fn set_dot_path_creates_missing_intermediate_objects() {
+        let mut config = json!({});
+        set_dot_path(&mut config, "fab_constraints.fab_house", json!("JLCPCB"))
+            .expect("should succeed");
+        assert_eq!(config["fab_constraints"]["fab_house"], "JLCPCB");
+    }
+
+    #[test]
+    fn set_dot_path_overwrites_existing_nested_value() {
+        let mut config = json!({ "fab_constraints": { "fab_house": "PCBWay" } });
+        set_dot_path(&mut config, "fab_constraints.fab_house", json!("JLCPCB"))
+            .expect("should succeed");
+        assert_eq!(config["fab_constraints"]["fab_house"], "JLCPCB");
+    }
+
+    #[test]
+    fn set_dot_path_errors_instead_of_panicking_on_non_object_root() {
+        // Regression test: a corrupted config file that parses as valid JSON
+        // but isn't a `{...}` object used to make this function panic via
+        // `.unwrap()` on a failed `get_mut`, crashing the whole server.
+        let mut config = json!(null);
+        let result = set_dot_path(&mut config, "fab_constraints.fab_house", json!("JLCPCB"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_dot_path_replaces_scalar_intermediate_segment_with_object() {
+        // "fab_constraints" already holds a string, not an object. The parent
+        // (root) is still an object, so it's free to replace that key with a
+        // fresh nested object rather than erroring — this matches the
+        // function's pre-existing "create if needed" behavior.
+        let mut config = json!({ "fab_constraints": "JLCPCB" });
+        set_dot_path(&mut config, "fab_constraints.fab_house", json!("PCBWay"))
+            .expect("should succeed by replacing the scalar with an object");
+        assert_eq!(config["fab_constraints"]["fab_house"], "PCBWay");
+    }
 }
