@@ -74,9 +74,9 @@ pub static ALL_TOOLSETS: &[ToolsetMeta] = &[
     },
     ToolsetMeta {
         name: "pcb_export",
-        description: "Gerber, PDF, SVG, 3D model, BOM, pick-and-place, DRC",
+        description: "Gerber, PDF, SVG, 3D model, BOM, pick-and-place, DRC, DXF/GenCAD/IPC-2581/ODB++",
         category: "pcb",
-        tool_count: 9,
+        tool_count: 13,
     },
     ToolsetMeta {
         name: "library",

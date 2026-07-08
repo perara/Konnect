@@ -3,9 +3,10 @@
 //! All exports, ERC, DRC, and annotation operations shell out to kicad-cli.
 //! This module provides a typed interface to those commands.
 //!
-//! VERIFIED against: kicad-cli from KiCAD 10.0 (C:\KiCad\10.0\bin\kicad-cli.exe)
+//! VERIFIED against: kicad-cli from KiCAD 10.0 (C:\Program Files\KiCad\10.0\bin\kicad-cli.exe)
 //! Commands validated: sch erc, sch export (bom/netlist/pdf/svg), pcb drc,
-//!   pcb export (gerbers/drill/pdf/svg/step/vrml/pos/ipcd356), pcb render
+//!   pcb export (gerbers/drill/pdf/svg/step/vrml/pos/ipcd356/dxf/gencad/ipc2581/odb),
+//!   pcb render
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -439,6 +440,90 @@ pub async fn export_ipcd356(cli: &str, pcb: &Path, output: &Path) -> Result<()> 
         "ipcd356",
         "--output",
         output.to_str().unwrap(),
+        pcb.to_str().unwrap(),
+    ];
+    run_cli(cli, &args, LONG_TIMEOUT).await?;
+    Ok(())
+}
+
+/// KiCAD 10: `pcb export dxf --output <dir> [--layers <csv>] --mode-multi <input>`
+///
+/// Unlike `pdf`/`svg`, DXF's `--layers` takes a single comma-separated value
+/// rather than a repeatable flag, and one file per requested layer is written
+/// into `output_dir` (verified against KiCAD 10.0).
+pub async fn export_dxf(cli: &str, pcb: &Path, output_dir: &Path, layers: &[&str]) -> Result<()> {
+    let output_str = output_dir.to_str().unwrap();
+    let pcb_str = pcb.to_str().unwrap();
+    let layers_csv = layers.join(",");
+
+    let mut args: Vec<&str> = vec!["pcb", "export", "dxf", "--output", output_str];
+    if !layers_csv.is_empty() {
+        args.push("--layers");
+        args.push(&layers_csv);
+    }
+    args.push("--mode-multi");
+    args.push(pcb_str);
+
+    run_cli(cli, &args, LONG_TIMEOUT).await?;
+    Ok(())
+}
+
+/// KiCAD 10: `pcb export gencad --output <path> <input>`
+pub async fn export_gencad(cli: &str, pcb: &Path, output: &Path) -> Result<()> {
+    let args = [
+        "pcb",
+        "export",
+        "gencad",
+        "--output",
+        output.to_str().unwrap(),
+        pcb.to_str().unwrap(),
+    ];
+    run_cli(cli, &args, LONG_TIMEOUT).await?;
+    Ok(())
+}
+
+/// KiCAD 10: `pcb export ipc2581 --output <path> --units <mm|in> [--compress] <input>`
+pub async fn export_ipc2581(
+    cli: &str,
+    pcb: &Path,
+    output: &Path,
+    units: &str,
+    compress: bool,
+) -> Result<()> {
+    let output_str = output.to_str().unwrap();
+    let pcb_str = pcb.to_str().unwrap();
+
+    let mut args: Vec<&str> = vec![
+        "pcb", "export", "ipc2581", "--output", output_str, "--units", units,
+    ];
+    if compress {
+        args.push("--compress");
+    }
+    args.push(pcb_str);
+
+    run_cli(cli, &args, LONG_TIMEOUT).await?;
+    Ok(())
+}
+
+/// KiCAD 10: `pcb export odb --output <path> --units <mm|in> --compression <mode> <input>`
+/// Compression modes (verified against KiCAD 10.0): `zip`, `none`, `tgz`.
+pub async fn export_odb(
+    cli: &str,
+    pcb: &Path,
+    output: &Path,
+    units: &str,
+    compression: &str,
+) -> Result<()> {
+    let args = [
+        "pcb",
+        "export",
+        "odb",
+        "--output",
+        output.to_str().unwrap(),
+        "--units",
+        units,
+        "--compression",
+        compression,
         pcb.to_str().unwrap(),
     ];
     run_cli(cli, &args, LONG_TIMEOUT).await?;

@@ -10,7 +10,7 @@ Canonical reference for every MCP tool exposed by Konnect. Generated from the Ru
 ## Overview
 
 - **17 toolsets** organized into 10 categories
-- **171 registered tools** + **6 always-visible meta-tools** = **177 total**
+- **175 registered tools** + **6 always-visible meta-tools** = **181 total**
 - **Discovery pattern**: the server pre-loads only the **starter kit** (`project`, `config`) so baseline `tools/list` costs ~2K tokens instead of ~23K. The LLM reads `list_toolboxes` → calls `load_toolset(name)` to expose additional tools on demand; `unload_toolset(name)` prunes them. `tools/list_changed` is notified on every mutation. If the LLM calls a tool whose toolset isn't loaded, the error names the owning toolset so recovery is a single `load_toolset` hop.
 - **Observability**: every `tools/call` is recorded — ring buffer of the last 100 calls + per-tool counters + JSONL at `<konnect dir>/logs/calls.jsonl`. The LLM self-diagnoses via `get_recent_calls` and `server_stats`.
 
@@ -217,8 +217,8 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `assign_net_to_class` | Assign a net to an existing netclass in the PCB file (S-expression edit). |
 | `route_differential_pair` | Route a differential pair (two parallel traces with a specified gap). |
 
-### `pcb_export` · 9 tools
-**Purpose:** Gerber, PDF, SVG, 3D model, BOM, pick-and-place, DRC.
+### `pcb_export` · 13 tools
+**Purpose:** Gerber, PDF, SVG, 3D model, BOM, pick-and-place, DRC, DXF/GenCAD/IPC-2581/ODB++.
 **Source:** [`crates/konnect-core/src/tools/pcb_export.rs`](crates/konnect-core/src/tools/pcb_export.rs)
 
 | Tool | Description |
@@ -230,6 +230,10 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `export_bom` | Generate a Bill of Materials (BOM) CSV from the schematic's component data. |
 | `export_netlist` | Export the PCB netlist in KiCAD or IPC-D-356 format. |
 | `export_position_file` | Generate a component placement (pick-and-place) position file for SMT assembly. |
+| `export_dxf` | Export the PCB to DXF, one file per layer, using kicad-cli. For mechanical CAD interchange. |
+| `export_gencad` | Export the PCB in GenCAD format using kicad-cli. |
+| `export_ipc2581` | Export the PCB in IPC-2581 format using kicad-cli — a unified fab/assembly/test data format. |
+| `export_odb` | Export the PCB in ODB++ format using kicad-cli — a unified fabrication data format. |
 | `refill_zones` | Refill all copper pour zones using kicad-cli (`zone-fill`). |
 | `get_drc_violations` | Run the Design Rule Check and return a list of violations. |
 

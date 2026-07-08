@@ -221,9 +221,9 @@ Run all: `PROTOC=<path> cargo test --workspace --lib --tests`
 
 ## Current Stats
 
-- **17 toolsets, 171 tools** + 6 meta-tools (4 routing + 2 observability — see `tool-directory.md`)
+- **17 toolsets, 175 tools** + 6 meta-tools (4 routing + 2 observability — see `tool-directory.md`)
 - Baseline `tools/list`: ~19 tools / ~2K tokens (starter kit + meta-tools)
-- Full-catalog `tools/list` (all loaded): ~177 tools / ~23K tokens
+- Full-catalog `tools/list` (all loaded): ~181 tools / ~23K tokens
 - **0 IPC stubs** (all protobuf methods implemented)
 - **0 unimplemented tools**
 - **3 CLI commands removed in KiCAD v10** (specctra DSN/SES, pcb sync — return clear errors)

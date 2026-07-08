@@ -1,4 +1,5 @@
-//! `pcb_export` toolset — Gerber, PDF, SVG, 3D, BOM, netlist, position file, DRC, zone refill.
+//! `pcb_export` toolset — Gerber, PDF, SVG, 3D, BOM, netlist, position file, DRC,
+//! zone refill, and DXF/GenCAD/IPC-2581/ODB++ interchange formats.
 //!
 //! All operations delegate to `kicad-cli` via the `cli` module, except `refill_zones`
 //! which uses the KiCAD IPC API.
@@ -189,6 +190,72 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": ["board", "output"]
             }),
             |args, ctx| async move { handle_export_position_file(args, ctx).await }
+        ),
+        tool!(
+            "export_dxf",
+            "Export the PCB to DXF using kicad-cli, one file per requested layer. \
+             Useful for mechanical CAD interchange (enclosures, panelization, laser cutting).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "board": { "type": "string", "description": "Path to .kicad_pcb file" },
+                    "output_dir": { "type": "string", "description": "Directory to write DXF files into (one per layer)" },
+                    "layers": {
+                        "type": "array",
+                        "description": "Layer names to export, e.g. ['Edge.Cuts', 'F.Cu']",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["board", "output_dir", "layers"]
+            }),
+            |args, ctx| async move { handle_export_dxf(args, ctx).await }
+        ),
+        tool!(
+            "export_gencad",
+            "Export the PCB in GenCAD format using kicad-cli. GenCAD is accepted by some \
+             CAM and test-fixture tooling as an alternative to a raw Gerber bundle.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "board": { "type": "string", "description": "Path to .kicad_pcb file" },
+                    "output": { "type": "string", "description": "Output .cad file path" }
+                },
+                "required": ["board", "output"]
+            }),
+            |args, ctx| async move { handle_export_gencad(args, ctx).await }
+        ),
+        tool!(
+            "export_ipc2581",
+            "Export the PCB in IPC-2581 format using kicad-cli. IPC-2581 is a unified \
+             fabrication/assembly/test data format accepted by many contract manufacturers \
+             as an alternative to a Gerber + drill + BOM + pick-and-place bundle.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "board": { "type": "string", "description": "Path to .kicad_pcb file" },
+                    "output": { "type": "string", "description": "Output file path (.xml)" },
+                    "units": { "type": "string", "description": "Output units: 'mm' (default) or 'in'", "default": "mm" },
+                    "compress": { "type": "boolean", "description": "Compress the output into a zip archive", "default": false }
+                },
+                "required": ["board", "output"]
+            }),
+            |args, ctx| async move { handle_export_ipc2581(args, ctx).await }
+        ),
+        tool!(
+            "export_odb",
+            "Export the PCB in ODB++ format using kicad-cli. ODB++ is a unified fabrication \
+             data format accepted by many fab houses as an alternative to a Gerber + drill bundle.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "board": { "type": "string", "description": "Path to .kicad_pcb file" },
+                    "output": { "type": "string", "description": "Output file path" },
+                    "units": { "type": "string", "description": "Output units: 'mm' (default) or 'in'", "default": "mm" },
+                    "compression": { "type": "string", "description": "Compression mode: 'zip' (default), 'none', or 'tgz'", "default": "zip" }
+                },
+                "required": ["board", "output"]
+            }),
+            |args, ctx| async move { handle_export_odb(args, ctx).await }
         ),
         tool!(
             "refill_zones",
@@ -421,6 +488,110 @@ async fn handle_export_position_file(
     ))
 }
 
+async fn handle_export_dxf(
+    args: &serde_json::Value,
+    ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let board = get_path(args, "board")?;
+    let output_dir = get_path(args, "output_dir")?;
+    let layers: Vec<String> = args["layers"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let layer_refs: Vec<&str> = layers.iter().map(|s| s.as_str()).collect();
+
+    tokio::fs::create_dir_all(&output_dir).await?;
+
+    let cli = &ctx.config.kicad_cli;
+    cli::export_dxf(cli, &board, &output_dir, &layer_refs).await?;
+
+    let mut files = Vec::new();
+    if let Ok(mut rd) = tokio::fs::read_dir(&output_dir).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            files.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    files.sort();
+
+    Ok(CallToolResult::text(
+        serde_json::to_string_pretty(&json!({
+            "success": true,
+            "output_dir": output_dir.to_str().unwrap_or(""),
+            "files": files
+        }))
+        .unwrap(),
+    ))
+}
+
+async fn handle_export_gencad(
+    args: &serde_json::Value,
+    ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let board = get_path(args, "board")?;
+    let output = get_path(args, "output")?;
+
+    let cli = &ctx.config.kicad_cli;
+    cli::export_gencad(cli, &board, &output).await?;
+
+    Ok(CallToolResult::text(
+        serde_json::to_string_pretty(&json!({
+            "success": true,
+            "output": output.to_str().unwrap_or("")
+        }))
+        .unwrap(),
+    ))
+}
+
+async fn handle_export_ipc2581(
+    args: &serde_json::Value,
+    ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let board = get_path(args, "board")?;
+    let output = get_path(args, "output")?;
+    let units = args["units"].as_str().unwrap_or("mm");
+    let compress = args["compress"].as_bool().unwrap_or(false);
+
+    let cli = &ctx.config.kicad_cli;
+    cli::export_ipc2581(cli, &board, &output, units, compress).await?;
+
+    Ok(CallToolResult::text(
+        serde_json::to_string_pretty(&json!({
+            "success": true,
+            "units": units,
+            "compressed": compress,
+            "output": output.to_str().unwrap_or("")
+        }))
+        .unwrap(),
+    ))
+}
+
+async fn handle_export_odb(
+    args: &serde_json::Value,
+    ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let board = get_path(args, "board")?;
+    let output = get_path(args, "output")?;
+    let units = args["units"].as_str().unwrap_or("mm");
+    let compression = args["compression"].as_str().unwrap_or("zip");
+
+    let cli = &ctx.config.kicad_cli;
+    cli::export_odb(cli, &board, &output, units, compression).await?;
+
+    Ok(CallToolResult::text(
+        serde_json::to_string_pretty(&json!({
+            "success": true,
+            "units": units,
+            "compression": compression,
+            "output": output.to_str().unwrap_or("")
+        }))
+        .unwrap(),
+    ))
+}
+
 async fn handle_refill_zones(
     args: &serde_json::Value,
     ctx: &ToolContext,
@@ -501,4 +672,113 @@ async fn handle_get_drc_violations(
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&summary).unwrap(),
     ))
+}
+
+#[cfg(test)]
+mod new_export_format_tests {
+    //! Tests for `export_dxf`/`export_gencad`/`export_ipc2581`/`export_odb`.
+    //!
+    //! These handlers shell out to `kicad-cli`, which isn't available in CI
+    //! (see ROADMAP.md's "mocked IPC endpoint" item — no kicad-cli mock exists
+    //! yet either), so we can only test what's reachable without it:
+    //! argument validation (missing required args fail before ever touching
+    //! `kicad-cli`) and that a missing/unconfigured `kicad-cli` binary produces
+    //! a clean error instead of a panic.
+
+    use super::*;
+    use crate::router::ToolRouter;
+    use crate::tools::ServerConfig;
+    use std::sync::Arc;
+
+    fn test_ctx() -> ToolContext {
+        ToolContext::new(
+            ServerConfig {
+                kicad_cli: String::new(),
+                kicad_binary: String::new(),
+                ipc_address: String::new(),
+                project_dir: None,
+                jlcpcb_db_path: None,
+            },
+            Arc::new(ToolRouter::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn export_dxf_missing_board_returns_error() {
+        let ctx = test_ctx();
+        let args = json!({ "output_dir": "out", "layers": ["Edge.Cuts"] });
+        assert!(handle_export_dxf(&args, &ctx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_dxf_fails_gracefully_without_kicad_cli() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = test_ctx();
+        let args = json!({
+            "board": dir.path().join("board.kicad_pcb").to_str().unwrap(),
+            "output_dir": dir.path().join("out").to_str().unwrap(),
+            "layers": ["Edge.Cuts", "F.Cu"]
+        });
+        // kicad_cli is "" in test_ctx, so spawning must fail — but as a
+        // returned error, not a panic.
+        assert!(handle_export_dxf(&args, &ctx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_gencad_missing_output_returns_error() {
+        let ctx = test_ctx();
+        let args = json!({ "board": "board.kicad_pcb" });
+        assert!(handle_export_gencad(&args, &ctx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_gencad_fails_gracefully_without_kicad_cli() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = test_ctx();
+        let args = json!({
+            "board": dir.path().join("board.kicad_pcb").to_str().unwrap(),
+            "output": dir.path().join("board.cad").to_str().unwrap()
+        });
+        assert!(handle_export_gencad(&args, &ctx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_ipc2581_missing_board_returns_error() {
+        let ctx = test_ctx();
+        let args = json!({ "output": "board.xml" });
+        assert!(handle_export_ipc2581(&args, &ctx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_ipc2581_fails_gracefully_without_kicad_cli() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = test_ctx();
+        let args = json!({
+            "board": dir.path().join("board.kicad_pcb").to_str().unwrap(),
+            "output": dir.path().join("board.xml").to_str().unwrap(),
+            "units": "mm",
+            "compress": true
+        });
+        assert!(handle_export_ipc2581(&args, &ctx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_odb_missing_output_returns_error() {
+        let ctx = test_ctx();
+        let args = json!({ "board": "board.kicad_pcb" });
+        assert!(handle_export_odb(&args, &ctx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_odb_fails_gracefully_without_kicad_cli() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = test_ctx();
+        let args = json!({
+            "board": dir.path().join("board.kicad_pcb").to_str().unwrap(),
+            "output": dir.path().join("board_odb.zip").to_str().unwrap(),
+            "units": "mm",
+            "compression": "zip"
+        });
+        assert!(handle_export_odb(&args, &ctx).await.is_err());
+    }
 }

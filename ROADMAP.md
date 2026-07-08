@@ -21,7 +21,6 @@ Opening an issue is the best way to influence priority.
 - **Symbol & footprint creation** — author new library parts from scratch, not
   just search and place existing ones.
 - **Eagle project import** — migrate legacy Eagle designs.
-- **Additional export formats** — IPC-2581, ODB++, GenCAD, DXF.
 - **Multi-sheet schematic viewer** — `kicad-cli sch export svg` emits one SVG
   per sheet; the live viewer currently shows only the root sheet. Add a sheet
   selector for hierarchical designs.
@@ -37,3 +36,7 @@ Opening an issue is the best way to influence priority.
 - ~~HTTP transport~~ — Streamable HTTP (MCP spec 2025-06-18) available via
   `transport = "http"` (or `"both"`): POST + GET (SSE) on a single `/mcp`
   endpoint, Origin validation, and a `/health` probe.
+- ~~Additional export formats~~ — IPC-2581, ODB++, GenCAD, and DXF are now
+  available via `export_ipc2581`, `export_odb`, `export_gencad`, and
+  `export_dxf` in the `pcb_export` toolset (all backed by native `kicad-cli`
+  subcommands, verified against KiCAD 10.0).
