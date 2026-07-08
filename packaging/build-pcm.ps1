@@ -48,6 +48,15 @@ if ($ViewerPath -and (Test-Path $ViewerPath)) {
     Write-Host "Included schematic viewer: $ViewerPath"
 }
 
+# Stamp the IPC entrypoint to this platform's binary name. plugin.json ships the
+# Windows default; the packaging step is authoritative so a package points at the
+# binary it actually bundles (build-pcm.sh stamps bin/konnect for macOS/Linux).
+$pluginManifest = Get-Content "$staging/plugins/plugin.json" -Raw | ConvertFrom-Json
+foreach ($action in $pluginManifest.actions) {
+    if ($action.entrypoint -like "bin/*") { $action.entrypoint = "bin/konnect.exe" }
+}
+$pluginManifest | ConvertTo-Json -Depth 10 | Set-Content "$staging/plugins/plugin.json"
+
 # Icons: PCM dialog icon at resources/, toolbar icon inside plugins/
 Copy-Item "$repoRoot/packaging/resources/icon.png" "$staging/resources/icon.png"
 Copy-Item "$repoRoot/packaging/resources/icon.png" "$staging/plugins/resources/icon.png"
