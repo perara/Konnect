@@ -16,8 +16,6 @@ Opening an issue is the best way to influence priority.
 
 - **`import_svg_logo`** — import an SVG file as silkscreen / copper artwork
   (path parsing + polygon tessellation, placed via the IPC API).
-- **Hierarchical sheets** — create and manage multi-sheet schematics
-  (hierarchical sheets, sheet pins, cross-sheet nets).
 - **Symbol & footprint creation** — author new library parts from scratch, not
   just search and place existing ones.
 - **Eagle project import** — migrate legacy Eagle designs.
@@ -45,3 +43,8 @@ Opening an issue is the best way to influence priority.
 - ~~Component search caching~~ — `search_jlcpcb_parts`, `get_jlcpcb_part`, and
   `suggest_jlcpcb_alternatives` now cache results for 5 minutes via a shared
   `QueryCache` on `ToolContext`; responses carry a `"cached"` field.
+- ~~Hierarchical sheets~~ — create and manage multi-sheet schematics via the
+  new `sch_hierarchy` toolset: sheet lifecycle (add/edit/move/delete/duplicate,
+  recursive hierarchy and page-numbering queries) plus sheet pin lifecycle
+  (import from hierarchical labels, add/edit/delete pins, pin/label sync
+  validation).
