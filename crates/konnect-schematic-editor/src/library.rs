@@ -79,9 +79,10 @@ pub fn resolve_lib_symbol(lib_id: &str) -> Option<String> {
                             );
                         }
                     }
-                    let sub_prefix = format!("(symbol \"{}_", symbol_name);
-                    let new_sub_prefix = format!("(symbol \"{}:{}_", library_name, symbol_name);
-                    renamed = renamed.replace(&sub_prefix, &new_sub_prefix);
+                    // Unit sub-symbols stay UNPREFIXED here too — same rule
+                    // as the symdir branch above (eeschema refuses prefixed
+                    // unit names; hit in CI where KiCAD ships single-file
+                    // libraries and this legacy branch handles the embed).
                     return Some(renamed);
                 }
             }
