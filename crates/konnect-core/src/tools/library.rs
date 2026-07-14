@@ -628,7 +628,7 @@ async fn handle_create_footprint(
             "footprint": name,
             "output": output.to_str().unwrap_or(""),
             "pad_count": pad_geoms.len(),
-            "courtyard": true,
+            "courtyard": !pad_geoms.is_empty(),
             "pin1_marked": !pad_geoms.is_empty(),
             "model": args.get("model").and_then(|m| m["path"].as_str()).unwrap_or("")
         }))
