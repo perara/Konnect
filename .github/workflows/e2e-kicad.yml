@@ -46,7 +46,7 @@ jobs:
           sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            kicad kicad-demos kicad-library-all xauth xvfb
+            kicad kicad-demos kicad-libraries xauth xvfb
           kicad-cli --version
 
       - name: E2E design loop (create → wire → ERC → Gerber → DRC)
