@@ -18,7 +18,7 @@ KiCAD recommends its stable PPA because Ubuntu's base repository is older:
 ```bash
 sudo add-apt-repository ppa:kicad/kicad-10.0-releases
 sudo apt update
-sudo apt install kicad kicad-demos kicad-libraries
+sudo apt install kicad kicad-demos kicad-symbols kicad-footprints
 ```
 
 For a source build:

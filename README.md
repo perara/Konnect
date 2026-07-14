@@ -178,8 +178,8 @@ the main workspace — see [DEV.md](DEV.md) for build steps.
 
 - KiCAD 10 on Windows or Linux
 - `kicad-cli` (ships with KiCAD — used for exports, ERC, DRC)
-- Standard KiCAD symbols and footprints (`kicad-library` on Arch/CachyOS,
-  `kicad-libraries` from the official KiCAD Ubuntu PPA)
+- Standard KiCAD symbols and footprints (`kicad-library` on Arch/CachyOS;
+  `kicad-symbols` and `kicad-footprints` from the official KiCAD Ubuntu PPA)
 - For PCB tools: KiCAD running with the target board open (IPC API)
 
 Linux installation, distro compatibility, Flatpak/Snap notes, and diagnostics are

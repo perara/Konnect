@@ -47,7 +47,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    prost_build::Config::new().compile_protos(protos, &includes)?;
+    let mut config = prost_build::Config::new();
+    // Ubuntu 22.04 ships protoc 3.12, where proto3 optional fields still
+    // require this switch. Newer protoc releases accept it as a no-op.
+    config.protoc_arg("--experimental_allow_proto3_optional");
+    config.compile_protos(protos, &includes)?;
 
     Ok(())
 }

@@ -60,7 +60,8 @@ test -d /usr/share/kicad/symbols
 ```
 
 Arch/CachyOS users need the separate `kicad-library` package. Ubuntu users of the
-official KiCAD PPA need `kicad-libraries`. See [Linux support](LINUX.md).
+official KiCAD PPA need `kicad-symbols` and `kicad-footprints`. See
+[Linux support](LINUX.md).
 
 ## Plugin doesn't appear in KiCAD
 
