@@ -6,11 +6,13 @@ name: E2E (real KiCAD)
 #   - the conformance suite round-trips every schematic in KiCAD's demo corpus
 #   - the PCM package is assembled and schema-validated
 #
-# Runs weekly, on release tags, and on demand. Not per-PR: installing KiCAD
-# costs several minutes and the per-PR suite already covers everything that
-# doesn't need a real KiCAD.
+# Runs on pull requests, weekly, on release tags, and on demand. The per-PR run
+# is intentional: Linux parity depends on real KiCAD CLI and GUI IPC behavior,
+# which cannot be proven by mock-only checks.
 
 on:
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
   workflow_dispatch:
