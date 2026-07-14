@@ -68,3 +68,21 @@ official KiCAD PPA need `kicad-symbols` and `kicad-footprints`. See
 Install via **Plugin and Content Manager → Install from File** with the
 `konnect-pcm-*.zip` release asset (not the bare binary archives), then restart
 KiCAD.
+
+If the fork's Releases page has no tagged assets yet, building the branch produces
+the server binary but not an installable PCM archive. Assemble one with
+`packaging/build-pcm.sh` as documented in [Linux support](LINUX.md) before using
+**Install from File**.
+
+## Viewer fails to start on Linux
+
+Check its dynamic libraries first:
+
+```bash
+ldd /path/to/schematic-viewer | grep 'not found'
+```
+
+Install GTK3, WebKitGTK 4.1, and librsvg runtime packages for your distribution.
+If the viewer starts but KiCAD itself has display glitches under Wayland, reproduce
+under an X11 session; [KiCAD's Linux guidance](https://www.kicad.org/download/linux-distros/)
+currently recommends X11 for GUI issue diagnosis.

@@ -95,7 +95,12 @@ The full tool catalog is documented in [tool-directory.md](tool-directory.md).
 
 ## Installation
 
-### From the KiCAD Plugin Manager (recommended)
+### From a tagged release (recommended when available)
+
+> **Release availability:** PCM archives are created only for `v*` tags. If the
+> [Releases](https://github.com/perara/Konnect/releases) page has no assets yet,
+> build the current branch from source; do not substitute an older upstream archive
+> when testing these Linux parity changes.
 
 1. Download the PCM archive for your operating system from
    [Releases](https://github.com/perara/Konnect/releases):
@@ -108,7 +113,9 @@ The full tool catalog is documented in [tool-directory.md](tool-directory.md).
 4. Restart KiCAD
 
 Verify: open the **PCB Editor** → **Tools → External Plugins** → you should see
-**Konnect**.
+**Konnect**. Enable **Edit → Preferences → Plugins → Enable KiCad API**, open
+the board you want to control, and click **Konnect** once to register that PCB Editor
+instance with the separately launched MCP server.
 
 ### Build from source
 
@@ -205,7 +212,7 @@ the architecture it proved, rebuilt for production:
 
 | | KiCAD-MCP-Server | Konnect |
 |---|---|---|
-| Runtime | Node.js + Python + SWIG bindings | Single static binary (~5 MB) |
+| Runtime | Node.js + Python + SWIG bindings | Single native Rust server process |
 | Tool call path | TS → subprocess → Python → SWIG C++ | Direct function call |
 | PCB backend | SWIG (deprecated by KiCAD) + experimental IPC | KiCAD 10 IPC API |
 | Schematic backend | kicad-skip + custom loaders | Native S-expression engine, atomic writes |

@@ -18,6 +18,9 @@ Thanks for your interest! Bug reports, feature requests, and pull requests are w
 cargo check --workspace
 cargo test --workspace --lib --tests
 cargo build --release -p konnect
+
+# The viewer is outside the workspace and must be checked separately
+cargo test --manifest-path crates/schematic-viewer/Cargo.toml
 ```
 
 See [DEV.md](DEV.md) for the architecture guide, tool conventions, and how to add a
@@ -28,6 +31,9 @@ new tool.
 - `cargo test --workspace --lib --tests` passes
 - `cargo clippy --workspace -- -D warnings` is clean
 - `cargo fmt --all` applied
+- If the change affects the viewer: its standalone tests and release build pass
+- If the change affects Linux discovery, IPC, packaging, or system dependencies:
+  the Linux parity and real-KiCAD E2E workflows pass
 - If you added or removed tools: update `tool_count` in `router/registry.rs` and
   regenerate the matching section of `tool-directory.md`
 

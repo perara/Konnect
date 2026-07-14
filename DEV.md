@@ -50,7 +50,7 @@ Konnect/
 │   │   └── src/
 │   │       ├── mcp/
 │   │       │   ├── protocol.rs      # MCP JSON-RPC 2.0 types
-│   │       │   ├── handler.rs       # Dispatch: initialize, tools/list (all tools static), tools/call
+│   │       │   ├── handler.rs       # Dispatch: initialize, dynamic tools/list, tools/call
 │   │       │   └── server.rs        # Session state machine
 │   │       ├── router/
 │   │       │   ├── mod.rs           # ToolRouter: load/unload toolsets
@@ -111,7 +111,9 @@ Konnect/
 │
 └── .github/workflows/
     ├── ci.yml                        # Check + test + clippy on 3 platforms
-    └── release.yml                   # Build binaries + GitHub Release on tag push
+    ├── linux-ci.yml                  # Five-distro build/package matrix + viewer smoke
+    ├── e2e-kicad.yml                 # Real KiCAD CLI/GUI and IPC regression coverage
+    └── release.yml                   # Build binaries + PCM archives on tag push
 ```
 
 ## KiCAD 10 Integration
@@ -119,7 +121,8 @@ Konnect/
 ### IPC API (PCB Editor — real-time)
 - Transport: **NNG** (nanomsg-next-gen) over IPC sockets (Windows named pipes)
 - Protocol: **Protocol Buffers** (protobuf3) with ApiRequest/ApiResponse envelope
-- Socket path: from `KICAD_API_SOCKET` environment variable (set by KiCAD when launching plugins)
+- Socket path: explicit `KICAD_API_SOCKET`, or the private discovery record written
+  by the KiCAD executable-plugin action and restored by the MCP process
 - Scope: **PCB editor only** — full CRUD on all board items, layer management, design rules
 - Schematic editor IPC: export-only (SVG, PDF, BOM, netlist) — NO item CRUD
 
@@ -136,7 +139,8 @@ Konnect/
 
 ### Plugin Installation
 - **PCM zip** is the correct install method
-- KiCAD installs to: `C:\KiCad\10.0\share\kicad\scripting\plugins\konnect\`
+- KiCAD normally installs third-party content below the per-user KiCAD data directory;
+  see the concrete Windows and Linux examples in [README.md](README.md)
 - Both `__init__.py` (SWIG ActionPlugin for PCB editor settings dialog) and `plugin.json` (IPC exec plugin) are included
 
 ## Structured Errors
@@ -179,7 +183,7 @@ if !path.exists() {
 
 Adding a new kind: edit `mcp/error.rs`, add the variant, add the match arm in `short_code()`, use it from the handler. The `short_code_matches_serialized_kind_field` test will fail loudly if they drift.
 
-The dispatch-level errors (not-loaded/unknown/handler-panic) are fully structured. So are **all missing-argument errors** across all 171 tools — `tools/mod.rs::require_str` / `require_f64` emit `ToolErrorKind::InvalidArgument { field, reason }` automatically. Most in-handler errors still use `CallToolResult::error("free text")` or bubble `anyhow::Error`; migrating them is incremental. `project.rs::handle_get_project_info` demonstrates the structured `FileNotFound` pattern.
+The dispatch-level errors (not-loaded/unknown/handler-panic) are fully structured. So are **all missing-argument errors** across all 185 tools — `tools/mod.rs::require_str` / `require_f64` emit `ToolErrorKind::InvalidArgument { field, reason }` automatically. Most in-handler errors still use `CallToolResult::error("free text")` or bubble `anyhow::Error`; migrating them is incremental. `project.rs::handle_get_project_info` demonstrates the structured `FileNotFound` pattern.
 
 ## Observability
 
@@ -200,7 +204,7 @@ Source: [`crates/konnect-core/src/observability.rs`](crates/konnect-core/src/obs
 
 ## Tool Routing (Starter Kit + On-Demand Loading)
 
-The server does NOT expose all 171 tools in `tools/list` by default — that would cost ~23K tokens of context on every listing. Instead:
+The server does NOT expose all 185 tools in `tools/list` by default — that would cost ~23K tokens of context on every listing. Instead:
 
 - **Startup**: only `STARTER_KIT` toolsets are pre-loaded (see `router/registry.rs::STARTER_KIT`). Currently: `project`, `config`. Combined with the 4 meta-tools, baseline `tools/list` is ~17 tools ≈ 2K tokens.
 - **On demand**: the LLM reads `list_toolboxes` → calls `load_toolset(name)` to expose a toolset's tools in subsequent `tools/list` responses. `unload_toolset(name)` prunes them when the task shifts.
@@ -238,23 +242,25 @@ Run all: `PROTOC=<path> cargo test --workspace --lib --tests`
 | `konnect-schematic-editor` tests | Typed schematic model + round-tripping |
 
 `schematic-viewer` is **excluded from the workspace** (`Cargo.toml`'s `[workspace] exclude`) since
-it's a Tauri app built separately — `cargo test --workspace` never touches it, and neither does
-CI (`.github/workflows/ci.yml` runs everything with `--workspace`). Run its tests explicitly:
+it's a Tauri app built separately — `cargo test --workspace` never touches it. Run its tests explicitly:
 `cd crates/schematic-viewer && cargo test`. Its 20 unit tests cover the pure sheet-tree-walking,
 watch-directory, render-snapshot, event-debounce, and incremental-render-selection logic
 (`walk_sheet_tree`, `compute_watch_dirs`, `snapshot_tree`, `drain_until_quiet`,
 `files_needing_render`, `render_all`'s error handling) — the actual `kicad-cli` subprocess call
 and Tauri command/event plumbing stay thin and untested, matching this codebase's existing
-convention for other `kicad-cli`-calling code.
+convention for other `kicad-cli`-calling code. Linux parity CI builds and tests the viewer on
+all five distro containers and launches it under Xvfb on Ubuntu; Windows E2E also builds it for
+PCM packaging.
 
 ## Linux CI and release gates
 
 - `.github/workflows/linux-ci.yml` checks the workspace on Ubuntu 24.04, Ubuntu
-  22.04, Debian 12, Fedora, and Arch containers, and separately builds/tests the
-  Tauri viewer.
-- `.github/workflows/e2e-kicad.yml` installs KiCAD 10, its standard libraries, and
-  demos on Ubuntu, then runs the real CLI design loop, 115-file demo conformance,
-  and Unix-socket IPC transport regression tests.
+  22.04, Debian 12, Fedora 44, and Arch containers; builds/tests the Tauri viewer;
+  assembles and installs the PCM; and runs a separate viewer GUI smoke test.
+- `.github/workflows/e2e-kicad.yml` runs on pull requests, weekly, release tags,
+  and manual dispatch. It installs KiCAD 10, its standard libraries, and demos on
+  Ubuntu, then runs the real CLI design loop, 115-file demo conformance,
+  Unix-socket IPC transport regressions, and live PCB Editor IPC tests under Xvfb.
 - `.github/workflows/release.yml` builds the Linux server and viewer on Debian 12,
   validates the Linux PCM package, and gates the ELF binaries with
   `packaging/check-linux-compat.sh`.

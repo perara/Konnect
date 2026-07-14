@@ -2,9 +2,32 @@
 
 Konnect supports KiCAD 10 on Linux for the full MCP server, schematic editing,
 `kicad-cli` exports/checks, PCB IPC operations, the KiCAD executable-plugin action,
-and the schematic viewer. Weekly CI exercises the real CLI design loop, KiCAD's
-demo corpus, a protocol-level Unix-socket suite, and real PCB Editor GUI IPC under
-Xvfb, including footprint move/rotate geometry-preservation regressions.
+and the schematic viewer. Pull-request and weekly CI exercise the real CLI design
+loop, KiCAD's demo corpus, a protocol-level Unix-socket suite, and real PCB Editor
+GUI IPC under Xvfb, including footprint move/rotate geometry-preservation
+regressions.
+
+## What CI proves
+
+The distro matrix deliberately separates portability checks from real-KiCAD tests:
+
+| Environment | Automated coverage |
+|---|---|
+| Ubuntu 24.04 LTS + KiCAD 10 | Workspace tests, release builds, PCM install smoke, viewer GUI smoke, real CLI design loop and demo corpus, Unix-socket IPC, and live PCB Editor placement/move/rotate |
+| Ubuntu 22.04 LTS | Workspace tests, release builds, PCM install smoke, viewer tests/build, and system `protoc` 3.12 compatibility |
+| Debian 12 | Workspace tests, release builds, PCM install smoke, and viewer tests/build; also the Linux release glibc baseline |
+| Fedora 44 | Workspace tests, release builds, PCM install smoke, and viewer tests/build |
+| Arch Linux (rolling container) | Workspace tests, release builds, PCM install smoke, and viewer tests/build |
+
+Windows CI independently runs the real CLI design loop, demo corpus, IPC transport
+regressions, and PCM packaging. Only Ubuntu 24.04 currently runs a real Linux KiCAD
+GUI session in CI; the other Linux rows prove build and package portability, not
+every desktop compositor, packaging sandbox, GPU driver, or KiCAD distribution.
+Release artifacts are currently built for x86-64 Linux. Other Linux architectures
+may build from source but are not covered by this matrix or the release workflow.
+Konnect's CI matrix is not a substitute for KiCAD's own operating-system support
+policy; check [KiCAD's current Linux distribution guidance](https://www.kicad.org/download/linux-distros/)
+before choosing a host distro.
 
 ## Recommended installation
 
@@ -24,7 +47,8 @@ sudo apt install kicad kicad-demos kicad-symbols kicad-footprints
 For a source build:
 
 ```bash
-sudo apt install build-essential cmake pkg-config protobuf-compiler libprotobuf-dev
+sudo apt install build-essential cmake pkg-config protobuf-compiler libprotobuf-dev \
+  python3 zip
 ```
 
 Building the viewer additionally requires:
@@ -49,8 +73,22 @@ sudo pacman -S base-devel cmake pkgconf protobuf gtk3 librsvg webkit2gtk-4.1
 
 ### Fedora
 
-Install KiCAD 10 using Fedora's current packages or the KiCAD-supported COPR, then
-verify both commands and the symbol directory:
+Fedora's current repositories provide KiCAD. Install the application and packaged
+libraries, then verify the CLI and symbol directory:
+
+```bash
+sudo dnf install kicad kicad-packages3d kicad-doc
+```
+
+If the Fedora release package is not KiCAD 10, use KiCAD's stable COPR:
+
+```bash
+sudo dnf install dnf-plugins-core
+sudo dnf copr enable @kicad/kicad-stable
+sudo dnf install kicad kicad-packages3d kicad-doc
+```
+
+Verify the installation:
 
 ```bash
 kicad-cli --version
@@ -68,7 +106,26 @@ sudo dnf install gcc gcc-c++ make cmake pkgconf-pkg-config protobuf-compiler \
 
 Konnect builds and runs on Debian 12's glibc baseline, but Debian stable may ship an
 older KiCAD major version. Install KiCAD 10 from a KiCAD-provided distribution method
-before using the PCB IPC features.
+before using the PCB IPC features. The Debian 12 CI row validates Konnect itself; the
+real KiCAD 10 CLI and GUI E2E job runs on Ubuntu 24.04.
+
+### Build a local PCM archive
+
+After installing the build dependencies for your distro, plus `python3` and `zip`,
+build both binaries and assemble a local PCM archive from the repository root:
+
+```bash
+cargo build --locked --release -p konnect
+cargo build --locked --release --manifest-path crates/schematic-viewer/Cargo.toml
+packaging/build-pcm.sh \
+  --binary target/release/konnect \
+  --viewer crates/schematic-viewer/target/release/schematic-viewer
+```
+
+Install the resulting `dist/konnect-pcm-linux-v<version>.zip` through KiCAD's
+**Plugin and Content Manager → Install from File**, then restart KiCAD. The packaging
+script preserves executable permissions and stamps the Linux `bin/konnect`
+entrypoint into the bundled plugin manifest.
 
 ## PCM and standalone layouts
 
@@ -88,6 +145,8 @@ KiCAD normally installs IPC plugins below
 
 The standalone Linux archive contains both `konnect` and `schematic-viewer`; keep them
 in the same directory so the `open_schematic_viewer` MCP tool can locate the viewer.
+The server is a native ELF binary, not a fully static executable. The viewer also
+requires GTK3, WebKitGTK 4.1, and librsvg runtime libraries from the host distro.
 
 ## Configuration and discovery
 
@@ -159,7 +218,12 @@ konnect status
 kicad-cli --version
 test -d /usr/share/kicad/symbols || echo "KiCAD symbol library missing"
 ldd /path/to/konnect
+ldd /path/to/schematic-viewer
 ```
+
+`konnect status` reports the bundled Claude skills/agents/hooks and whether KiCAD is
+found in a standard location. It does not open a live PCB IPC connection; use
+`open_project` or `check_kicad_ui` from the MCP client for that check.
 
 If placing `Device:R` reports that the library symbol cannot be found, install your
 distribution's KiCAD symbol/library package or set `KICAD10_SYMBOL_DIR` explicitly.
