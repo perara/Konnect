@@ -142,7 +142,7 @@ struct ViewerState {
 /// Resolve kicad-cli: explicit override → platform candidates → PATH.
 /// Candidate lists mirror `plugin/settings_dialog.py::detect_kicad_cli`.
 fn resolve_kicad_cli(override_path: Option<String>) -> String {
-    if let Some(p) = override_path {
+    if let Some(p) = override_path.or_else(|| std::env::var("KICAD_CLI").ok()) {
         if !p.is_empty() {
             return p;
         }
@@ -162,6 +162,7 @@ fn resolve_kicad_cli(override_path: Option<String>) -> String {
         &[
             "/usr/bin/kicad-cli",
             "/usr/local/bin/kicad-cli",
+            "/snap/bin/kicad-cli",
             "/snap/kicad/current/usr/bin/kicad-cli",
         ]
     };
@@ -175,6 +176,11 @@ fn resolve_kicad_cli(override_path: Option<String>) -> String {
 
 /// Resolve the KiCAD GUI binary for "Open in KiCAD".
 fn resolve_kicad_binary() -> String {
+    if let Ok(path) = std::env::var("KICAD_BINARY") {
+        if !path.is_empty() {
+            return path;
+        }
+    }
     let candidates: &[&str] = if cfg!(target_os = "windows") {
         &[
             r"C:\KiCad\10.0\bin\kicad.exe",

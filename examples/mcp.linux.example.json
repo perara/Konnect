@@ -1,0 +1,12 @@
+{
+  "_comment_1": "Use an absolute path to the extracted or PCM-installed Linux binary.",
+  "_comment_2": "Keep schematic-viewer beside konnect to enable open_schematic_viewer.",
+  "mcpServers": {
+    "konnect": {
+      "command": "/home/YOU/.local/share/KiCad/10.0/3rdparty/plugins/com_github_mixelpixx_konnect/bin/konnect",
+      "env": {
+        "RUST_LOG": "info"
+      }
+    }
+  }
+}

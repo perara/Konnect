@@ -55,6 +55,10 @@ def save_settings(settings_path, settings):
 
 def detect_kicad_cli():
     """Try to find kicad-cli by scanning common locations, registry, and PATH."""
+    explicit = os.environ.get("KICAD_CLI", "")
+    if explicit:
+        return explicit
+
     binary = "kicad-cli.exe" if sys.platform == "win32" else "kicad-cli"
 
     if sys.platform == "win32":
@@ -102,6 +106,7 @@ def detect_kicad_cli():
         candidates = [
             "/usr/bin/kicad-cli",
             "/usr/local/bin/kicad-cli",
+            "/snap/bin/kicad-cli",
             "/snap/kicad/current/usr/bin/kicad-cli",
         ]
         for path in candidates:
@@ -198,10 +203,10 @@ class KonnectSettingsDialog(wx.Dialog):
         main_sizer.Add(adv_box, 0, wx.EXPAND | wx.ALL, 8)
 
         # ── Server status section ────────────────────────────────────
-        server_box = wx.StaticBoxSizer(wx.HORIZONTAL, panel, "Server")
+        server_box = wx.StaticBoxSizer(wx.HORIZONTAL, panel, "Local MCP Server")
         self.server_status = wx.StaticText(panel, label="Stopped")
         server_box.Add(self.server_status, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 5)
-        self.start_stop_btn = wx.Button(panel, label="Start Server")
+        self.start_stop_btn = wx.Button(panel, label="Start HTTP Server")
         self.start_stop_btn.Bind(wx.EVT_BUTTON, self._on_start_stop)
         server_box.Add(self.start_stop_btn, 0, wx.ALL, 5)
         main_sizer.Add(server_box, 0, wx.EXPAND | wx.ALL, 8)
@@ -272,7 +277,7 @@ class KonnectSettingsDialog(wx.Dialog):
         else:
             self.server_status.SetLabel("Stopped")
             self.server_status.SetForegroundColour(wx.Colour(180, 0, 0))
-            self.start_stop_btn.SetLabel("Start Server")
+            self.start_stop_btn.SetLabel("Start HTTP Server")
 
     # ── Event handlers ───────────────────────────────────────────────
 

@@ -5,10 +5,9 @@ Opening an issue is the best way to influence priority.
 
 ## Platform
 
-- **Linux and macOS builds.** The code already carries `#[cfg]` branches and Unix
-  paths for both platforms, and CI checks all three OSes — what remains is release
-  packaging, per-platform QA against a running KiCAD, and macOS code signing /
-  notarization.
+- **macOS packaging and notarization.** Linux has native server/viewer builds,
+  platform PCM packaging, distro CI, and real KiCAD CLI E2E coverage. macOS still
+  needs a native PCM package plus code signing/notarization and running-KiCAD QA.
 - **KiCAD PCM publication** — submit the plugin to the official KiCAD addon
   repository once the first tagged release is out.
 

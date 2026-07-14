@@ -13,7 +13,7 @@
   },
   "license": "open-source",
   "resources": {
-    "homepage": "https://github.com/mixelpixx/Konnect"
+    "homepage": "https://github.com/perara/Konnect"
   },
   "versions": [
     {
@@ -21,6 +21,8 @@
       "status": "stable",
       "kicad_version": "10.0",
       "kicad_version_max": "10.99",
+      "platforms": ["windows"],
+      "runtime": "ipc",
       "download_sha256": "ecfd26cdffdc08b5b495c04ad70b046d52b2f559fe3e89abc7b88baa1da780d0",
       "download_size": 8627049,
       "download_url": "https://github.com/mixelpixx/Konnect/releases/download/v0.1.3/konnect-pcm-v0.1.3.zip",

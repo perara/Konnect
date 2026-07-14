@@ -1,0 +1,159 @@
+name: Linux parity CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  distro-workspace:
+    name: Workspace on ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04 LTS
+            image: ubuntu:24.04
+            family: debian
+          - name: Ubuntu 22.04 LTS
+            image: ubuntu:22.04
+            family: debian
+          - name: Debian 12
+            image: debian:12
+            family: debian
+          - name: Fedora 44
+            image: fedora:44
+            family: fedora
+          - name: Arch Linux
+            image: archlinux:base-devel
+            family: arch
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install distro build dependencies
+        shell: bash
+        run: |
+          case "${{ matrix.family }}" in
+            debian)
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                build-essential ca-certificates cmake curl file git libgtk-3-dev \
+                libprotobuf-dev librsvg2-dev libwebkit2gtk-4.1-dev pkg-config protobuf-compiler \
+                python3-jsonschema unzip zip
+              ;;
+            fedora)
+              dnf install -y ca-certificates cmake curl file gcc gcc-c++ git make \
+                gtk3-devel librsvg2-devel pkgconf-pkg-config protobuf-compiler \
+                protobuf-devel python3-jsonschema unzip webkit2gtk4.1-devel zip
+              ;;
+            arch)
+              pacman -Syu --noconfirm base-devel ca-certificates cmake curl file git \
+                gtk3 librsvg pkgconf protobuf python-jsonschema unzip webkit2gtk-4.1 zip
+              ;;
+          esac
+
+      - name: Install Rust stable
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.family }}-${{ matrix.image }}
+
+      - name: Build and test workspace
+        shell: bash
+        run: |
+          cargo check --locked --workspace
+          cargo test --locked --workspace --lib --tests
+          cargo build --locked --release -p konnect
+          cargo test --locked --manifest-path crates/schematic-viewer/Cargo.toml
+          cargo build --locked --release --manifest-path crates/schematic-viewer/Cargo.toml
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linux-ci","version":"1"}}}' \
+            | target/release/konnect | grep -q '"serverInfo"'
+
+      - name: Package, install, and smoke-test Linux PCM
+        shell: bash
+        run: |
+          ./packaging/build-pcm.sh --version 0.0.0 \
+            --binary target/release/konnect \
+            --viewer crates/schematic-viewer/target/release/schematic-viewer \
+            --out dist
+          python3 packaging/validate-pcm.py \
+            --zip dist/konnect-pcm-linux-v0.0.0.zip --platform linux
+
+          install_root="${RUNNER_TEMP:-/tmp}/konnect-pcm-install"
+          rm -rf "$install_root"
+          mkdir -p "$install_root"
+          unzip -q dist/konnect-pcm-linux-v0.0.0.zip -d "$install_root"
+          test -x "$install_root/plugins/bin/konnect"
+          test -x "$install_root/plugins/bin/schematic-viewer"
+          "$install_root/plugins/bin/konnect" --version | grep -q '^konnect '
+          if ldd "$install_root/plugins/bin/konnect" \
+              "$install_root/plugins/bin/schematic-viewer" | grep -q 'not found'; then
+            ldd "$install_root/plugins/bin/konnect" \
+              "$install_root/plugins/bin/schematic-viewer"
+            exit 1
+          fi
+          python3 -m py_compile \
+            "$install_root/plugins/__init__.py" \
+            "$install_root/plugins/settings_dialog.py"
+
+  viewer-smoke:
+    name: Linux schematic viewer GUI smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev librsvg2-dev libwebkit2gtk-4.1-dev xauth xvfb
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/schematic-viewer
+          key: linux-viewer
+      - name: Build and test viewer
+        run: |
+          cargo test --locked --manifest-path crates/schematic-viewer/Cargo.toml
+          cargo build --locked --release --manifest-path crates/schematic-viewer/Cargo.toml
+      - name: Launch viewer under a virtual display
+        run: |
+          set +e
+          timeout 10s xvfb-run -a \
+            crates/schematic-viewer/target/release/schematic-viewer \
+            >viewer-smoke.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 124 ]; then
+            cat viewer-smoke.log
+            echo "viewer exited unexpectedly with status $status" >&2
+            exit 1
+          fi
+
+  linux-quality:
+    name: Linux quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --all-targets

@@ -6,7 +6,7 @@ Two modes, combinable:
   python packaging/validate-pcm.py --metadata packaging/metadata.json
       Validate a metadata.json file against the vendored packages.v1 schema.
 
-  python packaging/validate-pcm.py --zip dist/konnect-pcm-v0.1.2.zip
+  python packaging/validate-pcm.py --zip dist/konnect-pcm-linux-v0.1.2.zip --platform linux
       Assert the PCM zip structure (metadata at root, plugin launcher,
       per-OS entrypoint binary, icons) and validate the embedded metadata.
 
@@ -26,6 +26,7 @@ from pathlib import Path
 import jsonschema
 
 SCHEMA_PATH = Path(__file__).parent / "schema" / "packages.v1.schema.json"
+PLUGIN_SCHEMA_PATH = Path(__file__).parent / "schema" / "api-plugin.v1.schema.json"
 
 REQUIRED_ZIP_ENTRIES = [
     "metadata.json",
@@ -50,7 +51,7 @@ def validate_metadata(meta: dict, label: str) -> list[str]:
     return errors
 
 
-def validate_zip(zip_path: Path) -> list[str]:
+def validate_zip(zip_path: Path, expected_platform: str | None = None) -> list[str]:
     errors = []
     z = zipfile.ZipFile(zip_path)
     names = set(z.namelist())
@@ -67,9 +68,20 @@ def validate_zip(zip_path: Path) -> list[str]:
 
     if "plugins/plugin.json" in names:
         plugin = json.loads(z.read("plugins/plugin.json"))
+        try:
+            jsonschema.validate(
+                plugin,
+                json.loads(PLUGIN_SCHEMA_PATH.read_text(encoding="utf-8")),
+            )
+        except jsonschema.ValidationError as e:
+            errors.append(
+                f"{zip_path.name}:plugin.json: schema violation at "
+                f"{e.json_path}: {e.message}"
+            )
         for action in plugin.get("actions", []):
             ep = action.get("entrypoint", "")
-            if ep.startswith("bin/") and f"plugins/{ep}" not in names:
+            executable = ep.split(" ", 1)[0]
+            if executable.startswith("bin/") and f"plugins/{executable}" not in names:
                 errors.append(
                     f"{zip_path.name}: plugin.json entrypoint '{ep}' "
                     f"not present in the zip"
@@ -86,6 +98,33 @@ def validate_zip(zip_path: Path) -> list[str]:
                         f"{zip_path.name}: {field} is an empty string — "
                         f"omit the field or provide a real value"
                     )
+            if v.get("runtime") != "ipc":
+                errors.append(f"{zip_path.name}: runtime must be 'ipc'")
+            if expected_platform and v.get("platforms") != [expected_platform]:
+                errors.append(
+                    f"{zip_path.name}: expected platforms ['{expected_platform}'], "
+                    f"got {v.get('platforms')}"
+                )
+
+        if expected_platform == "linux":
+            for binary, label in (
+                ("plugins/bin/konnect", "server"),
+                ("plugins/bin/schematic-viewer", "schematic viewer"),
+            ):
+                if binary not in names:
+                    errors.append(
+                        f"{zip_path.name}: Linux {label} binary is missing"
+                    )
+                    continue
+                mode = z.getinfo(binary).external_attr >> 16
+                if mode & 0o111 == 0:
+                    errors.append(
+                        f"{zip_path.name}: Linux {label} is not executable"
+                    )
+        elif expected_platform == "windows":
+            for binary in ("plugins/bin/konnect.exe", "plugins/bin/schematic-viewer.exe"):
+                if binary not in names:
+                    errors.append(f"{zip_path.name}: Windows binary is missing: {binary}")
 
     return errors
 
@@ -94,6 +133,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--metadata", type=Path, help="metadata.json to validate")
     ap.add_argument("--zip", type=Path, help="PCM zip to validate")
+    ap.add_argument("--platform", choices=("linux", "windows", "macos"))
     args = ap.parse_args()
 
     if not args.metadata and not args.zip:
@@ -104,7 +144,7 @@ def main() -> int:
         meta = json.loads(args.metadata.read_text(encoding="utf-8"))
         errors += validate_metadata(meta, str(args.metadata))
     if args.zip:
-        errors += validate_zip(args.zip)
+        errors += validate_zip(args.zip, args.platform)
 
     if errors:
         for e in errors:

@@ -1,8 +1,10 @@
 //! `templates` toolset — Reference circuit library for validated subcircuit templates.
 //!
-//! Templates are JSON files stored in `~/.konnect/templates/` (user) and
-//! shipped as embedded defaults. Claude retrieves a template and adapts it to the
-//! user's project — this prevents hallucinating component values.
+//! Templates are JSON files stored in the platform user-data directory and
+//! shipped as embedded defaults. On Linux, the directory is
+//! `$XDG_DATA_HOME/konnect/templates` (normally `~/.local/share/konnect/templates`).
+//! Claude retrieves a template and adapts it to the user's project — this
+//! prevents hallucinating component values.
 
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
@@ -162,10 +164,23 @@ fn user_templates_dir() -> PathBuf {
         let appdata = std::env::var("APPDATA").unwrap_or_default();
         PathBuf::from(appdata).join("konnect").join("templates")
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_default();
         PathBuf::from(home).join(".konnect").join("templates")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::data_local_dir)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".local/share")
+            })
+            .join("konnect")
+            .join("templates")
     }
 }
 

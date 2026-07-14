@@ -60,8 +60,419 @@ fn unpack_any<M: Message + Default>(any: &prost_types::Any) -> Result<M> {
     M::decode(any.value.as_slice()).context("Failed to decode protobuf Any body")
 }
 
+fn translate_vector(vector: &mut Option<kiapi::common::types::Vector2>, dx_nm: i64, dy_nm: i64) {
+    if let Some(vector) = vector {
+        vector.x_nm = vector.x_nm.saturating_add(dx_nm);
+        vector.y_nm = vector.y_nm.saturating_add(dy_nm);
+    }
+}
+
+fn translate_poly_line(line: &mut kiapi::common::types::PolyLine, dx_nm: i64, dy_nm: i64) {
+    use kiapi::common::types::poly_line_node::Geometry;
+
+    for node in &mut line.nodes {
+        match node.geometry.as_mut() {
+            Some(Geometry::Point(point)) => {
+                point.x_nm = point.x_nm.saturating_add(dx_nm);
+                point.y_nm = point.y_nm.saturating_add(dy_nm);
+            }
+            Some(Geometry::Arc(arc)) => {
+                translate_vector(&mut arc.start, dx_nm, dy_nm);
+                translate_vector(&mut arc.mid, dx_nm, dy_nm);
+                translate_vector(&mut arc.end, dx_nm, dy_nm);
+            }
+            None => {}
+        }
+    }
+}
+
+fn translate_poly_set(set: &mut Option<kiapi::common::types::PolySet>, dx_nm: i64, dy_nm: i64) {
+    let Some(set) = set else {
+        return;
+    };
+    translate_poly_set_value(set, dx_nm, dy_nm);
+}
+
+fn translate_poly_set_value(set: &mut kiapi::common::types::PolySet, dx_nm: i64, dy_nm: i64) {
+    for polygon in &mut set.polygons {
+        if let Some(outline) = &mut polygon.outline {
+            translate_poly_line(outline, dx_nm, dy_nm);
+        }
+        for hole in &mut polygon.holes {
+            translate_poly_line(hole, dx_nm, dy_nm);
+        }
+    }
+}
+
+fn translate_text(text: &mut kiapi::common::types::Text, dx_nm: i64, dy_nm: i64) {
+    translate_vector(&mut text.position, dx_nm, dy_nm);
+}
+
+fn translate_field(field: &mut kiapi::board::types::Field, dx_nm: i64, dy_nm: i64) {
+    if let Some(text) = field
+        .text
+        .as_mut()
+        .and_then(|board_text| board_text.text.as_mut())
+    {
+        translate_text(text, dx_nm, dy_nm);
+    }
+}
+
+fn translate_graphic_shape(shape: &mut kiapi::common::types::GraphicShape, dx_nm: i64, dy_nm: i64) {
+    use kiapi::common::types::graphic_shape::Geometry;
+
+    match shape.geometry.as_mut() {
+        Some(Geometry::Segment(segment)) => {
+            translate_vector(&mut segment.start, dx_nm, dy_nm);
+            translate_vector(&mut segment.end, dx_nm, dy_nm);
+        }
+        Some(Geometry::Rectangle(rectangle)) => {
+            translate_vector(&mut rectangle.top_left, dx_nm, dy_nm);
+            translate_vector(&mut rectangle.bottom_right, dx_nm, dy_nm);
+        }
+        Some(Geometry::Arc(arc)) => {
+            translate_vector(&mut arc.start, dx_nm, dy_nm);
+            translate_vector(&mut arc.mid, dx_nm, dy_nm);
+            translate_vector(&mut arc.end, dx_nm, dy_nm);
+        }
+        Some(Geometry::Circle(circle)) => {
+            translate_vector(&mut circle.center, dx_nm, dy_nm);
+            translate_vector(&mut circle.radius_point, dx_nm, dy_nm);
+        }
+        Some(Geometry::Polygon(polygon)) => {
+            translate_poly_set_value(polygon, dx_nm, dy_nm);
+        }
+        Some(Geometry::Bezier(bezier)) => {
+            translate_vector(&mut bezier.start, dx_nm, dy_nm);
+            translate_vector(&mut bezier.control1, dx_nm, dy_nm);
+            translate_vector(&mut bezier.control2, dx_nm, dy_nm);
+            translate_vector(&mut bezier.end, dx_nm, dy_nm);
+        }
+        None => {}
+    }
+}
+
+fn translate_dimension(dimension: &mut kiapi::board::types::Dimension, dx_nm: i64, dy_nm: i64) {
+    use kiapi::board::types::dimension::DimensionStyle;
+
+    if let Some(text) = &mut dimension.text {
+        translate_text(text, dx_nm, dy_nm);
+    }
+    match dimension.dimension_style.as_mut() {
+        Some(DimensionStyle::Aligned(style)) => {
+            translate_vector(&mut style.start, dx_nm, dy_nm);
+            translate_vector(&mut style.end, dx_nm, dy_nm);
+        }
+        Some(DimensionStyle::Orthogonal(style)) => {
+            translate_vector(&mut style.start, dx_nm, dy_nm);
+            translate_vector(&mut style.end, dx_nm, dy_nm);
+        }
+        Some(DimensionStyle::Radial(style)) => {
+            translate_vector(&mut style.center, dx_nm, dy_nm);
+            translate_vector(&mut style.radius_point, dx_nm, dy_nm);
+        }
+        Some(DimensionStyle::Leader(style)) => {
+            translate_vector(&mut style.start, dx_nm, dy_nm);
+            translate_vector(&mut style.end, dx_nm, dy_nm);
+        }
+        Some(DimensionStyle::Center(style)) => {
+            translate_vector(&mut style.center, dx_nm, dy_nm);
+            translate_vector(&mut style.end, dx_nm, dy_nm);
+        }
+        None => {}
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Rotation {
+    center_x_nm: i64,
+    center_y_nm: i64,
+    sin: f64,
+    cos: f64,
+    delta_degrees: f64,
+}
+
+impl Rotation {
+    fn new(center_x_nm: i64, center_y_nm: i64, delta_degrees: f64) -> Self {
+        let radians = delta_degrees.to_radians();
+        Self {
+            center_x_nm,
+            center_y_nm,
+            sin: radians.sin(),
+            cos: radians.cos(),
+            delta_degrees,
+        }
+    }
+
+    fn vector(self, vector: &mut Option<kiapi::common::types::Vector2>) {
+        let Some(vector) = vector else {
+            return;
+        };
+        let x = (vector.x_nm - self.center_x_nm) as f64;
+        let y = (vector.y_nm - self.center_y_nm) as f64;
+        // KiCad's positive board angles are clockwise in its Y-down board
+        // coordinate system.
+        vector.x_nm = self.center_x_nm + (x * self.cos + y * self.sin).round() as i64;
+        vector.y_nm = self.center_y_nm + (-x * self.sin + y * self.cos).round() as i64;
+    }
+
+    fn angle(self, angle: &mut Option<kiapi::common::types::Angle>) {
+        if let Some(angle) = angle {
+            angle.value_degrees += self.delta_degrees;
+        }
+    }
+}
+
+fn rotate_poly_line(line: &mut kiapi::common::types::PolyLine, rotation: Rotation) {
+    use kiapi::common::types::poly_line_node::Geometry;
+
+    for node in &mut line.nodes {
+        match node.geometry.as_mut() {
+            Some(Geometry::Point(point)) => {
+                let x = (point.x_nm - rotation.center_x_nm) as f64;
+                let y = (point.y_nm - rotation.center_y_nm) as f64;
+                point.x_nm =
+                    rotation.center_x_nm + (x * rotation.cos + y * rotation.sin).round() as i64;
+                point.y_nm =
+                    rotation.center_y_nm + (-x * rotation.sin + y * rotation.cos).round() as i64;
+            }
+            Some(Geometry::Arc(arc)) => {
+                rotation.vector(&mut arc.start);
+                rotation.vector(&mut arc.mid);
+                rotation.vector(&mut arc.end);
+            }
+            None => {}
+        }
+    }
+}
+
+fn rotate_poly_set(set: &mut Option<kiapi::common::types::PolySet>, rotation: Rotation) {
+    if let Some(set) = set {
+        rotate_poly_set_value(set, rotation);
+    }
+}
+
+fn rotate_poly_set_value(set: &mut kiapi::common::types::PolySet, rotation: Rotation) {
+    for polygon in &mut set.polygons {
+        if let Some(outline) = &mut polygon.outline {
+            rotate_poly_line(outline, rotation);
+        }
+        for hole in &mut polygon.holes {
+            rotate_poly_line(hole, rotation);
+        }
+    }
+}
+
+fn rotate_text(text: &mut kiapi::common::types::Text, rotation: Rotation) {
+    rotation.vector(&mut text.position);
+    if let Some(attributes) = &mut text.attributes {
+        rotation.angle(&mut attributes.angle);
+    }
+}
+
+fn rotate_field(field: &mut kiapi::board::types::Field, rotation: Rotation) {
+    if let Some(text) = field
+        .text
+        .as_mut()
+        .and_then(|board_text| board_text.text.as_mut())
+    {
+        rotate_text(text, rotation);
+    }
+}
+
+fn rotate_graphic_shape(shape: &mut kiapi::common::types::GraphicShape, rotation: Rotation) {
+    use kiapi::common::types::graphic_shape::Geometry;
+
+    match shape.geometry.as_mut() {
+        Some(Geometry::Segment(segment)) => {
+            rotation.vector(&mut segment.start);
+            rotation.vector(&mut segment.end);
+        }
+        Some(Geometry::Rectangle(rectangle)) => {
+            rotation.vector(&mut rectangle.top_left);
+            rotation.vector(&mut rectangle.bottom_right);
+        }
+        Some(Geometry::Arc(arc)) => {
+            rotation.vector(&mut arc.start);
+            rotation.vector(&mut arc.mid);
+            rotation.vector(&mut arc.end);
+        }
+        Some(Geometry::Circle(circle)) => {
+            rotation.vector(&mut circle.center);
+            rotation.vector(&mut circle.radius_point);
+        }
+        Some(Geometry::Polygon(polygon)) => rotate_poly_set_value(polygon, rotation),
+        Some(Geometry::Bezier(bezier)) => {
+            rotation.vector(&mut bezier.start);
+            rotation.vector(&mut bezier.control1);
+            rotation.vector(&mut bezier.control2);
+            rotation.vector(&mut bezier.end);
+        }
+        None => {}
+    }
+}
+
+fn rotate_dimension(dimension: &mut kiapi::board::types::Dimension, rotation: Rotation) {
+    use kiapi::board::types::dimension::DimensionStyle;
+
+    if let Some(text) = &mut dimension.text {
+        rotate_text(text, rotation);
+    }
+    match dimension.dimension_style.as_mut() {
+        Some(DimensionStyle::Aligned(style)) => {
+            rotation.vector(&mut style.start);
+            rotation.vector(&mut style.end);
+        }
+        Some(DimensionStyle::Orthogonal(style)) => {
+            rotation.vector(&mut style.start);
+            rotation.vector(&mut style.end);
+        }
+        Some(DimensionStyle::Radial(style)) => {
+            rotation.vector(&mut style.center);
+            rotation.vector(&mut style.radius_point);
+        }
+        Some(DimensionStyle::Leader(style)) => {
+            rotation.vector(&mut style.start);
+            rotation.vector(&mut style.end);
+        }
+        Some(DimensionStyle::Center(style)) => {
+            rotation.vector(&mut style.center);
+            rotation.vector(&mut style.end);
+        }
+        None => {}
+    }
+}
+
+fn repack_any<M: Message>(any: &mut prost_types::Any, message: &M) {
+    any.value = message.encode_to_vec();
+}
+
+/// KiCad 10 serializes footprint children using board-space coordinates even
+/// though several protobuf comments call them footprint-relative. Updating a
+/// footprint replaces the whole object, so its children must be translated by
+/// the same delta as the parent or they remain physically behind and KiCad
+/// persists corrupt relative offsets (mixelpixx/Konnect#23).
+fn translate_footprint_child(any: &mut prost_types::Any, dx_nm: i64, dy_nm: i64) -> Result<()> {
+    match any.type_url.as_str() {
+        "type.googleapis.com/kiapi.board.types.Pad" => {
+            let mut item: kiapi::board::types::Pad = unpack_any(any)?;
+            translate_vector(&mut item.position, dx_nm, dy_nm);
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Field" => {
+            let mut item: kiapi::board::types::Field = unpack_any(any)?;
+            translate_field(&mut item, dx_nm, dy_nm);
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.BoardText" => {
+            let mut item: kiapi::board::types::BoardText = unpack_any(any)?;
+            if let Some(text) = &mut item.text {
+                translate_text(text, dx_nm, dy_nm);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.BoardTextBox" => {
+            let mut item: kiapi::board::types::BoardTextBox = unpack_any(any)?;
+            if let Some(textbox) = &mut item.textbox {
+                translate_vector(&mut textbox.top_left, dx_nm, dy_nm);
+                translate_vector(&mut textbox.bottom_right, dx_nm, dy_nm);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.BoardGraphicShape" => {
+            let mut item: kiapi::board::types::BoardGraphicShape = unpack_any(any)?;
+            if let Some(shape) = &mut item.shape {
+                translate_graphic_shape(shape, dx_nm, dy_nm);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Zone" => {
+            let mut item: kiapi::board::types::Zone = unpack_any(any)?;
+            translate_poly_set(&mut item.outline, dx_nm, dy_nm);
+            for filled in &mut item.filled_polygons {
+                translate_poly_set(&mut filled.shapes, dx_nm, dy_nm);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Dimension" => {
+            let mut item: kiapi::board::types::Dimension = unpack_any(any)?;
+            translate_dimension(&mut item, dx_nm, dy_nm);
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Group"
+        | "type.googleapis.com/kiapi.board.types.Footprint3DModel" => {}
+        unsupported => anyhow::bail!(
+            "cannot safely move footprint containing unsupported KiCad child type '{unsupported}'"
+        ),
+    }
+    Ok(())
+}
+
+fn rotate_footprint_child(any: &mut prost_types::Any, rotation: Rotation) -> Result<()> {
+    match any.type_url.as_str() {
+        "type.googleapis.com/kiapi.board.types.Pad" => {
+            let mut item: kiapi::board::types::Pad = unpack_any(any)?;
+            rotation.vector(&mut item.position);
+            if let Some(stack) = &mut item.pad_stack {
+                rotation.angle(&mut stack.angle);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Field" => {
+            let mut item: kiapi::board::types::Field = unpack_any(any)?;
+            rotate_field(&mut item, rotation);
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.BoardText" => {
+            let mut item: kiapi::board::types::BoardText = unpack_any(any)?;
+            if let Some(text) = &mut item.text {
+                rotate_text(text, rotation);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.BoardTextBox" => {
+            let mut item: kiapi::board::types::BoardTextBox = unpack_any(any)?;
+            if let Some(textbox) = &mut item.textbox {
+                rotation.vector(&mut textbox.top_left);
+                rotation.vector(&mut textbox.bottom_right);
+                if let Some(attributes) = &mut textbox.attributes {
+                    rotation.angle(&mut attributes.angle);
+                }
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.BoardGraphicShape" => {
+            let mut item: kiapi::board::types::BoardGraphicShape = unpack_any(any)?;
+            if let Some(shape) = &mut item.shape {
+                rotate_graphic_shape(shape, rotation);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Zone" => {
+            let mut item: kiapi::board::types::Zone = unpack_any(any)?;
+            rotate_poly_set(&mut item.outline, rotation);
+            for filled in &mut item.filled_polygons {
+                rotate_poly_set(&mut filled.shapes, rotation);
+            }
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Dimension" => {
+            let mut item: kiapi::board::types::Dimension = unpack_any(any)?;
+            rotate_dimension(&mut item, rotation);
+            repack_any(any, &item);
+        }
+        "type.googleapis.com/kiapi.board.types.Group"
+        | "type.googleapis.com/kiapi.board.types.Footprint3DModel" => {}
+        unsupported => anyhow::bail!(
+            "cannot safely rotate footprint containing unsupported KiCad child type '{unsupported}'"
+        ),
+    }
+    Ok(())
+}
+
 pub struct KiCadIpcClient {
     socket_path: String,
+    kicad_token: String,
     client_name: String,
 }
 
@@ -77,8 +488,20 @@ impl KiCadIpcClient {
         };
         KiCadIpcClient {
             socket_path: effective_path,
+            kicad_token: std::env::var("KICAD_API_TOKEN").unwrap_or_default(),
             client_name: format!("konnect-{}", std::process::id()),
         }
+    }
+
+    /// Create a client with an explicit API token.
+    ///
+    /// KiCAD supplies this token to executable plugins through
+    /// `KICAD_API_TOKEN`. This constructor is useful for clients that obtain
+    /// the connection details through another discovery mechanism.
+    pub fn new_with_token(socket_path: impl Into<String>, token: impl Into<String>) -> Self {
+        let mut client = Self::new(socket_path);
+        client.kicad_token = token.into();
+        client
     }
 
     /// Send a protobuf command and return the response Any.
@@ -97,13 +520,13 @@ impl KiCadIpcClient {
                  (3) restart the AI client so the server rereads settings. \
                  Alternatively set ipc_socket_path in konnect-settings.json or launch \
                  via KiCAD (which sets KICAD_API_SOCKET). \
-                 Full guide: https://github.com/mixelpixx/Konnect/blob/main/docs/TROUBLESHOOTING.md"
+                 Full guide: https://github.com/perara/Konnect/blob/main/docs/TROUBLESHOOTING.md"
             );
         }
 
         let request = kiapi::common::ApiRequest {
             header: Some(kiapi::common::ApiRequestHeader {
-                kicad_token: String::new(), // Empty = accept any instance
+                kicad_token: self.kicad_token.clone(),
                 client_name: self.client_name.clone(),
             }),
             message: Some(pack_any(command, type_name)),
@@ -318,7 +741,21 @@ impl KiCadIpcClient {
             items,
             container: None,
         };
-        self.send_command(&cmd, "kiapi.common.commands.CreateItems")?;
+        if let Some(any) = self.send_command(&cmd, "kiapi.common.commands.CreateItems")? {
+            let response: kiapi::common::commands::CreateItemsResponse = unpack_any(&any)?;
+            for result in response.created_items {
+                let status = result
+                    .status
+                    .context("KiCAD returned a creation result without item status")?;
+                if status.code() != kiapi::common::commands::ItemStatusCode::IscOk {
+                    anyhow::bail!(
+                        "KiCAD item creation failed: {} ({})",
+                        status.error_message,
+                        status.code().as_str_name()
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -330,7 +767,21 @@ impl KiCadIpcClient {
             header: Some(header),
             items,
         };
-        self.send_command(&cmd, "kiapi.common.commands.UpdateItems")?;
+        if let Some(any) = self.send_command(&cmd, "kiapi.common.commands.UpdateItems")? {
+            let response: kiapi::common::commands::UpdateItemsResponse = unpack_any(&any)?;
+            for result in response.updated_items {
+                let Some(status) = result.status else {
+                    anyhow::bail!("KiCAD returned an update result without item status");
+                };
+                if status.code() != kiapi::common::commands::ItemStatusCode::IscOk {
+                    anyhow::bail!(
+                        "KiCAD item update failed: {} ({})",
+                        status.error_message,
+                        status.code().as_str_name()
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -567,15 +1018,33 @@ impl KiCadIpcClient {
                     .map(|t| t.text.as_str())
                     .unwrap_or("");
                 if ref_text == reference {
-                    fp.position = Some(crate::builders::vec2(x, y));
-                    let any = crate::builders::pack_any(&fp, "kiapi.board.types.FootprintInstance");
+                    let old_position = fp.position.as_ref().context(
+                        "KiCAD returned a footprint without a position; refusing unsafe move",
+                    )?;
+                    let new_position = crate::builders::vec2(x, y);
+                    let dx_nm = new_position.x_nm.saturating_sub(old_position.x_nm);
+                    let dy_nm = new_position.y_nm.saturating_sub(old_position.y_nm);
 
-                    let header = self.make_header()?;
-                    let cmd = kiapi::common::commands::UpdateItems {
-                        header: Some(header),
-                        items: vec![any],
-                    };
-                    self.send_command(&cmd, "kiapi.common.commands.UpdateItems")?;
+                    if let Some(field) = &mut fp.reference_field {
+                        translate_field(field, dx_nm, dy_nm);
+                    }
+                    if let Some(field) = &mut fp.value_field {
+                        translate_field(field, dx_nm, dy_nm);
+                    }
+                    if let Some(field) = &mut fp.datasheet_field {
+                        translate_field(field, dx_nm, dy_nm);
+                    }
+                    if let Some(field) = &mut fp.description_field {
+                        translate_field(field, dx_nm, dy_nm);
+                    }
+                    if let Some(definition) = &mut fp.definition {
+                        for child in &mut definition.items {
+                            translate_footprint_child(child, dx_nm, dy_nm)?;
+                        }
+                    }
+                    fp.position = Some(new_position);
+                    let any = crate::builders::pack_any(&fp, "kiapi.board.types.FootprintInstance");
+                    self.update_items(vec![any])?;
                     return Ok(());
                 }
             }
@@ -598,21 +1067,88 @@ impl KiCadIpcClient {
                     .map(|t| t.text.as_str())
                     .unwrap_or("");
                 if ref_text == reference {
+                    let position = fp.position.as_ref().context(
+                        "KiCAD returned a footprint without a position; refusing unsafe rotation",
+                    )?;
+                    let old_angle = fp
+                        .orientation
+                        .as_ref()
+                        .map(|orientation| orientation.value_degrees)
+                        .unwrap_or(0.0);
+                    let rotation = Rotation::new(position.x_nm, position.y_nm, angle - old_angle);
+
+                    if let Some(field) = &mut fp.reference_field {
+                        rotate_field(field, rotation);
+                    }
+                    if let Some(field) = &mut fp.value_field {
+                        rotate_field(field, rotation);
+                    }
+                    if let Some(field) = &mut fp.datasheet_field {
+                        rotate_field(field, rotation);
+                    }
+                    if let Some(field) = &mut fp.description_field {
+                        rotate_field(field, rotation);
+                    }
+                    if let Some(definition) = &mut fp.definition {
+                        for child in &mut definition.items {
+                            rotate_footprint_child(child, rotation)?;
+                        }
+                    }
                     fp.orientation = Some(kiapi::common::types::Angle {
                         value_degrees: angle,
                     });
                     let any = crate::builders::pack_any(&fp, "kiapi.board.types.FootprintInstance");
-                    let header = self.make_header()?;
-                    let cmd = kiapi::common::commands::UpdateItems {
-                        header: Some(header),
-                        items: vec![any],
-                    };
-                    self.send_command(&cmd, "kiapi.common.commands.UpdateItems")?;
+                    self.update_items(vec![any])?;
                     return Ok(());
                 }
             }
         }
         anyhow::bail!("Footprint '{}' not found", reference)
+    }
+
+    /// Update the visible value field of an existing footprint.
+    pub fn set_footprint_value(&self, reference: &str, value: &str) -> Result<()> {
+        let items = self.get_items(kiapi::common::types::KiCadObjectType::KotPcbFootprint)?;
+        for item in items {
+            if let Ok(mut footprint) =
+                kiapi::board::types::FootprintInstance::decode(item.value.as_slice())
+            {
+                let current_reference = footprint
+                    .reference_field
+                    .as_ref()
+                    .and_then(|field| field.text.as_ref())
+                    .and_then(|board_text| board_text.text.as_ref())
+                    .map(|text| text.text.as_str())
+                    .unwrap_or("");
+                if current_reference != reference {
+                    continue;
+                }
+                if let Some(text) = footprint
+                    .value_field
+                    .as_mut()
+                    .and_then(|field| field.text.as_mut())
+                    .and_then(|board_text| board_text.text.as_mut())
+                {
+                    text.text = value.to_string();
+                } else {
+                    anyhow::bail!("Footprint '{reference}' has no editable value field");
+                }
+                if let Some(text) = footprint
+                    .definition
+                    .as_mut()
+                    .and_then(|definition| definition.value_field.as_mut())
+                    .and_then(|field| field.text.as_mut())
+                    .and_then(|board_text| board_text.text.as_mut())
+                {
+                    text.text = value.to_string();
+                }
+                let any =
+                    crate::builders::pack_any(&footprint, "kiapi.board.types.FootprintInstance");
+                self.update_items(vec![any])?;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Footprint '{reference}' not found")
     }
 
     /// Delete a footprint by reference.
@@ -621,46 +1157,190 @@ impl KiCadIpcClient {
         self.delete_items(vec![kiid])
     }
 
-    /// Place a footprint — currently requires KiCAD's ParseAndCreateItemsFromString.
+    /// Place a footprint instance through the typed KiCAD CreateItems API.
+    #[allow(clippy::too_many_arguments)]
     pub fn place_footprint(
         &self,
         lib_id: &str,
+        reference: &str,
+        value: &str,
+        pads: &[IpcPadDefinition],
         x: f64,
         y: f64,
         rotation: f64,
         layer: &str,
     ) -> Result<IpcFootprint> {
-        // KiCAD 10 IPC doesn't have a direct "place footprint from library" command.
-        // The CreateItems command requires a fully formed FootprintInstance protobuf,
-        // which needs the complete footprint definition (pads, shapes, etc.) from the library.
-        // For now, use ParseAndCreateItemsFromString with S-expression format.
-        let sexp = format!(
-            r#"(footprint "{lib_id}"
-  (layer "{layer}")
-  (at {x} {y} {rotation})
-)"#,
-            lib_id = lib_id,
-            layer = layer,
-            x = crate::builders::mm_to_nm(x) as f64 / 1_000_000.0,
-            y = crate::builders::mm_to_nm(y) as f64 / 1_000_000.0,
-            rotation = rotation,
-        );
+        let (library_nickname, entry_name) = lib_id
+            .split_once(':')
+            .context("footprint identifier must use Library:Footprint syntax")?;
+        let text_field =
+            |name: &str, text: &str, field_y: f64, visible: bool| kiapi::board::types::Field {
+                id: None,
+                name: name.to_string(),
+                text: Some(kiapi::board::types::BoardText {
+                    id: None,
+                    text: Some(kiapi::common::types::Text {
+                        position: Some(crate::builders::vec2(x, field_y)),
+                        attributes: Some(kiapi::common::types::TextAttributes {
+                            size: Some(crate::builders::vec2(1.0, 1.0)),
+                            angle: Some(kiapi::common::types::Angle {
+                                value_degrees: rotation,
+                            }),
+                            ..Default::default()
+                        }),
+                        text: text.to_string(),
+                        hyperlink: String::new(),
+                    }),
+                    layer: crate::builders::layer_from_name(if layer == "B.Cu" {
+                        "B.SilkS"
+                    } else {
+                        "F.SilkS"
+                    }) as i32,
+                    knockout: false,
+                    locked: kiapi::common::types::LockedState::LsUnlocked as i32,
+                }),
+                visible,
+            };
+        let reference_field = text_field("Reference", reference, y - 1.0, true);
+        let value_field = text_field("Value", value, y + 1.0, false);
+        let radians = rotation.to_radians();
+        let child_items = pads
+            .iter()
+            .map(|pad| {
+                let local_x = pad.x;
+                let local_y = pad.y;
+                let board_x = x + local_x * radians.cos() + local_y * radians.sin();
+                let board_y = y - local_x * radians.sin() + local_y * radians.cos();
+                let mut layers = Vec::new();
+                for name in &pad.layers {
+                    match name.as_str() {
+                        "*.Cu" => layers.extend(3..=34),
+                        "*.Mask" => layers.extend([
+                            kiapi::board::types::BoardLayer::BlFMask as i32,
+                            kiapi::board::types::BoardLayer::BlBMask as i32,
+                        ]),
+                        "*.Paste" => layers.extend([
+                            kiapi::board::types::BoardLayer::BlFPaste as i32,
+                            kiapi::board::types::BoardLayer::BlBPaste as i32,
+                        ]),
+                        name => layers.push(crate::builders::layer_from_name(name) as i32),
+                    }
+                }
+                layers
+                    .retain(|layer| *layer != kiapi::board::types::BoardLayer::BlUndefined as i32);
+                layers.sort_unstable();
+                layers.dedup();
 
-        let doc = self.get_board_document()?;
-        let cmd = kiapi::common::commands::ParseAndCreateItemsFromString {
-            document: Some(doc),
-            contents: sexp,
+                let shape = match pad.shape.as_str() {
+                    "circle" => kiapi::board::types::PadStackShape::PssCircle,
+                    "rect" => kiapi::board::types::PadStackShape::PssRectangle,
+                    "oval" => kiapi::board::types::PadStackShape::PssOval,
+                    "trapezoid" => kiapi::board::types::PadStackShape::PssTrapezoid,
+                    "roundrect" => kiapi::board::types::PadStackShape::PssRoundrect,
+                    "chamfered_rect" => kiapi::board::types::PadStackShape::PssChamferedrect,
+                    _ => kiapi::board::types::PadStackShape::PssRectangle,
+                };
+                let copper_layer =
+                    if layers.contains(&(kiapi::board::types::BoardLayer::BlFCu as i32)) {
+                        kiapi::board::types::BoardLayer::BlFCu
+                    } else {
+                        kiapi::board::types::BoardLayer::BlBCu
+                    };
+                let copper = kiapi::board::types::PadStackLayer {
+                    layer: copper_layer as i32,
+                    shape: shape as i32,
+                    size: Some(crate::builders::vec2(pad.size_x, pad.size_y)),
+                    corner_rounding_ratio: pad.roundrect_ratio,
+                    custom_anchor_shape: shape as i32,
+                    offset: Some(crate::builders::vec2(0.0, 0.0)),
+                    ..Default::default()
+                };
+                let drill = pad
+                    .drill_x
+                    .map(|drill_x| kiapi::board::types::DrillProperties {
+                        start_layer: kiapi::board::types::BoardLayer::BlFCu as i32,
+                        end_layer: kiapi::board::types::BoardLayer::BlBCu as i32,
+                        diameter: Some(crate::builders::vec2(
+                            drill_x,
+                            pad.drill_y.unwrap_or(drill_x),
+                        )),
+                        shape: if pad.drill_oval {
+                            kiapi::board::types::DrillShape::DsOblong as i32
+                        } else {
+                            kiapi::board::types::DrillShape::DsCircle as i32
+                        },
+                        ..Default::default()
+                    });
+                let stack = kiapi::board::types::PadStack {
+                    r#type: kiapi::board::types::PadStackType::PstNormal as i32,
+                    layers,
+                    drill,
+                    unconnected_layer_removal: kiapi::board::types::UnconnectedLayerRemoval::UlrKeep
+                        as i32,
+                    copper_layers: vec![copper],
+                    angle: Some(kiapi::common::types::Angle {
+                        value_degrees: rotation + pad.rotation,
+                    }),
+                    ..Default::default()
+                };
+                let pad_type = match pad.pad_type.as_str() {
+                    "thru_hole" => kiapi::board::types::PadType::PtPth,
+                    "np_thru_hole" => kiapi::board::types::PadType::PtNpth,
+                    "connect" => kiapi::board::types::PadType::PtEdgeConnector,
+                    _ => kiapi::board::types::PadType::PtSmd,
+                };
+                let item = kiapi::board::types::Pad {
+                    number: pad.number.clone(),
+                    r#type: pad_type as i32,
+                    pad_stack: Some(stack),
+                    position: Some(crate::builders::vec2(board_x, board_y)),
+                    locked: kiapi::common::types::LockedState::LsUnlocked as i32,
+                    ..Default::default()
+                };
+                crate::builders::pack_any(&item, "kiapi.board.types.Pad")
+            })
+            .collect();
+        let definition = kiapi::board::types::Footprint {
+            id: Some(kiapi::common::types::LibraryIdentifier {
+                library_nickname: library_nickname.to_string(),
+                entry_name: entry_name.to_string(),
+            }),
+            reference_field: Some(reference_field.clone()),
+            value_field: Some(value_field.clone()),
+            items: child_items,
+            ..Default::default()
         };
-        self.send_command(&cmd, "kiapi.common.commands.ParseAndCreateItemsFromString")?;
-
-        Ok(IpcFootprint {
-            reference: String::new(),
-            value: String::new(),
-            footprint: lib_id.to_string(),
-            position: IpcVector2 { x, y },
-            rotation,
-            layer: layer.to_string(),
-        })
+        let footprint = kiapi::board::types::FootprintInstance {
+            position: Some(crate::builders::vec2(x, y)),
+            orientation: Some(kiapi::common::types::Angle {
+                value_degrees: rotation,
+            }),
+            layer: crate::builders::layer_from_name(layer) as i32,
+            locked: kiapi::common::types::LockedState::LsUnlocked as i32,
+            definition: Some(definition),
+            reference_field: Some(reference_field),
+            value_field: Some(value_field),
+            ..Default::default()
+        };
+        self.create_items(vec![crate::builders::pack_any(
+            &footprint,
+            "kiapi.board.types.FootprintInstance",
+        )])?;
+        let footprints = self.list_footprints()?;
+        footprints
+            .iter()
+            .find(|footprint| footprint.reference == reference)
+            .cloned()
+            .with_context(|| {
+                let references = footprints
+                    .iter()
+                    .map(|footprint| footprint.reference.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "KiCAD created the footprint but reference '{reference}' was not found (board references: {references})"
+                )
+            })
     }
 
     /// Get board extents (bounding box of all items).

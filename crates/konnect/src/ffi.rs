@@ -38,6 +38,7 @@ pub unsafe extern "C" fn kicad_plugin_init(config_path: *const c_char) -> c_int 
         use crate::config::{Config, TransportMode};
         use konnect_core::mcp::handler::McpHandler;
 
+        crate::config::restore_kicad_instance_environment();
         let config = match config_path_str.as_deref() {
             Some(p) => Config::load_from(std::path::Path::new(p)).unwrap_or_default(),
             None => Config::load().unwrap_or_default(),

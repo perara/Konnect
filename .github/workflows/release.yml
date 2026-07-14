@@ -19,9 +19,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
@@ -69,6 +66,64 @@ jobs:
           name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
           path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.*
 
+  linux-build:
+    name: Build portable Linux release and PCM
+    runs-on: ubuntu-latest
+    container: debian:12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and Tauri dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl file git libgtk-3-dev \
+            libprotobuf-dev librsvg2-dev libwebkit2gtk-4.1-dev pkg-config protobuf-compiler \
+            python3 python3-jsonschema zip
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-debian12-release
+
+      - name: Build Linux server and viewer
+        run: |
+          cargo build --locked --release -p konnect
+          cargo build --locked --release --manifest-path crates/schematic-viewer/Cargo.toml
+
+      - name: Enforce Linux compatibility baseline
+        run: packaging/check-linux-compat.sh target/release/konnect crates/schematic-viewer/target/release/schematic-viewer 2.36
+
+      - name: Package standalone Linux archive
+        run: |
+          mkdir -p linux-archive
+          install -m755 target/release/konnect linux-archive/konnect
+          install -m755 crates/schematic-viewer/target/release/schematic-viewer linux-archive/schematic-viewer
+          tar -C linux-archive -czf "konnect-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" konnect schematic-viewer
+
+      - name: Assemble and validate Linux PCM package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          packaging/build-pcm.sh --version "$version" \
+            --binary target/release/konnect \
+            --viewer crates/schematic-viewer/target/release/schematic-viewer \
+            --out dist
+          python3 packaging/validate-pcm.py \
+            --zip "dist/konnect-pcm-linux-v$version.zip" --platform linux
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: konnect-linux
+          path: |
+            konnect-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            dist/konnect-pcm-linux-*.zip
+
   pcm-package:
     name: KiCAD PCM plugin package
     runs-on: windows-latest
@@ -88,8 +143,7 @@ jobs:
       - name: Build server binary
         run: cargo build --release -p konnect
 
-      - name: Build schematic viewer (optional)
-        continue-on-error: true
+      - name: Build schematic viewer
         run: cargo build --release --manifest-path crates/schematic-viewer/Cargo.toml
 
       - name: Assemble PCM package
@@ -106,7 +160,8 @@ jobs:
         run: |
           pip install jsonschema
           $version = "${{ github.ref_name }}".TrimStart('v')
-          python packaging/validate-pcm.py --zip "dist/konnect-pcm-v$version.zip"
+          python packaging/validate-pcm.py `
+            --zip "dist/konnect-pcm-windows-v$version.zip" --platform windows
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -116,7 +171,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build, pcm-package]
+    needs: [build, linux-build, pcm-package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

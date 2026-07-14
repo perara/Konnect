@@ -30,12 +30,14 @@ where
     let url = format!("tcp://127.0.0.1:{port}");
 
     let listen_url = url.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let thread = std::thread::spawn(move || {
         let socket = nng::Socket::new(nng::Protocol::Rep0).expect("mock rep socket");
         socket
             .set_opt::<nng::options::RecvTimeout>(Some(Duration::from_secs(20)))
             .unwrap();
         socket.listen(&listen_url).expect("mock listen");
+        ready_tx.send(()).expect("signal mock readiness");
         while let Ok(msg) = socket.recv() {
             let request = match kiapi::common::ApiRequest::decode(msg.as_slice()) {
                 Ok(r) => r,
@@ -58,6 +60,9 @@ where
             }
         }
     });
+    ready_rx
+        .recv()
+        .expect("mock server failed before listening");
 
     MockKicad {
         url,
@@ -93,6 +98,18 @@ fn ping_roundtrips_through_mock() {
     });
 
     let client = KiCadIpcClient::new(&mock.url);
+    assert!(client.ping().unwrap());
+}
+
+#[test]
+fn explicit_kicad_token_is_sent_in_request_header() {
+    let mock = spawn_mock(|req| {
+        let header = req.header.expect("request header");
+        assert_eq!(header.kicad_token, "linux-instance-token");
+        Some(ok_response())
+    });
+
+    let client = KiCadIpcClient::new_with_token(&mock.url, "linux-instance-token");
     assert!(client.ping().unwrap());
 }
 

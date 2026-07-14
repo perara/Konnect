@@ -1,8 +1,9 @@
 //! `config` toolset — User preferences, project rules, and effective configuration.
 //!
-//! Persists user-level config to `~/.konnect/config.json` and project-level
+//! Persists user-level config to the platform config directory and project-level
 //! config to `<project_dir>/.konnect/project.json`. Claude should call
-//! `load_user_config` at the start of every session.
+//! `load_user_config` at the start of every session. On Linux this follows the
+//! XDG base-directory convention (`$XDG_CONFIG_HOME/konnect` by default).
 
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
@@ -63,8 +64,11 @@ fn user_config_dir() -> PathBuf {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".konnect")
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::config_dir)
+            .unwrap_or_else(|| PathBuf::from(".config"))
+            .join("konnect")
     }
 }
 

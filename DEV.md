@@ -24,6 +24,13 @@ Schematic-viewer build notes (Windows):
 - Close any running viewer window before rebuilding — Windows locks a running
   `.exe`, so the link step fails while the app is open.
 
+Schematic-viewer build notes (Linux):
+
+- Install GTK3, WebKitGTK 4.1, and librsvg development packages first; see
+  [docs/LINUX.md](docs/LINUX.md).
+- The viewer is intentionally built outside the root workspace, so run both its
+  tests and release build explicitly.
+
 ## Architecture
 
 ```
@@ -182,7 +189,7 @@ Every `tools/call` flows through `McpHandler::execute_tool`, which wraps the dis
 - **JSONL append** to `<konnect dir>/logs/calls.jsonl` (one line per call). Paths:
   - Windows: `%APPDATA%\konnect\logs\calls.jsonl`
   - macOS: `~/Library/Application Support/konnect/logs/calls.jsonl`
-  - Linux: `~/.konnect/logs/calls.jsonl`
+  - Linux: `$XDG_STATE_HOME/konnect/logs/calls.jsonl` (normally `~/.local/state/konnect/logs/calls.jsonl`)
 - **Structured `tracing` events** (`tool_call_start` + `tool_call_end`) carrying `call_id`, `tool`, `toolset`, `status`, `dur_ms` — greppable in the stderr log.
 
 Each `CallRecord` includes: `call_id`, `ts` (unix ms), `tool`, `toolset` (optional — `None` for meta-tools), `dur_ms`, `status` (`ok` / `error` / `not_found`), `error_kind`, `args_bytes`, `result_bytes`.
@@ -216,6 +223,8 @@ The router is defined in `crates/konnect-core/src/router/mod.rs`.
     override with `--kicad-cli <path>`
   - Rebuilds fail while a viewer window is open (Windows locks the running `.exe`) — close
     the app before `cargo build`
+  - Linux requires GTK3 + WebKitGTK 4.1 development headers. Release artifacts are
+    built on Debian 12 and checked for a maximum glibc 2.36 requirement.
 
 ## Test Suite
 
@@ -237,6 +246,18 @@ watch-directory, render-snapshot, event-debounce, and incremental-render-selecti
 `files_needing_render`, `render_all`'s error handling) — the actual `kicad-cli` subprocess call
 and Tauri command/event plumbing stay thin and untested, matching this codebase's existing
 convention for other `kicad-cli`-calling code.
+
+## Linux CI and release gates
+
+- `.github/workflows/linux-ci.yml` checks the workspace on Ubuntu 24.04, Ubuntu
+  22.04, Debian 12, Fedora, and Arch containers, and separately builds/tests the
+  Tauri viewer.
+- `.github/workflows/e2e-kicad.yml` installs KiCAD 10, its standard libraries, and
+  demos on Ubuntu, then runs the real CLI design loop, 115-file demo conformance,
+  and Unix-socket IPC transport regression tests.
+- `.github/workflows/release.yml` builds the Linux server and viewer on Debian 12,
+  validates the Linux PCM package, and gates the ELF binaries with
+  `packaging/check-linux-compat.sh`.
 
 ## Adding a New Tool
 

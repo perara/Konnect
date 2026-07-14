@@ -236,7 +236,7 @@ pub struct StatsSnapshot {
 
 // ─── Path helpers ────────────────────────────────────────────────────────────
 
-/// Platform-specific path for konnect state files (config, logs, cache).
+/// Platform-specific path for Konnect configuration and call logs.
 /// Matches the convention in `tools/config.rs::user_config_dir`.
 pub fn konnect_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -254,8 +254,15 @@ pub fn konnect_dir() -> PathBuf {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".konnect")
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::state_dir)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".local/state")
+            })
+            .join("konnect")
     }
 }
 

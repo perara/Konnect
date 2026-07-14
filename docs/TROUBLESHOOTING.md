@@ -3,11 +3,9 @@
 ## "KiCAD IPC socket path not configured"
 
 Any tool that talks to a live KiCAD session (`save_project`, PCB editing,
-`check_kicad_ui`, …) needs the IPC socket address. Two separate configurations
-must both be correct — neither happens automatically:
-
-1. **The socket path in Konnect's plugin settings** (inside KiCAD)
-2. **The Konnect server registration in your AI client's MCP config**
+`check_kicad_ui`, …) needs the IPC socket address. The PCM executable action now
+registers this automatically; the AI client still needs to launch the Konnect MCP
+binary.
 
 Step by step (based on the diagnostic guide contributed in
 [#18](https://github.com/mixelpixx/Konnect/issues/18)):
@@ -20,27 +18,27 @@ Step by step (based on the diagnostic guide contributed in
    Listening on ipc://C:\Users\<you>\AppData\Local\Temp\kicad\api.sock
    ```
 
-   Copy the whole address including the `ipc://` prefix — it is unique to
-   your machine and user.
-3. In KiCAD, open **Tools → External Plugins → Konnect** to open the settings
-   dialog.
-4. Paste the address into the **IPC Socket** field and click **Save**.
-5. Confirm your AI client (Claude Code, Claude Desktop, …) has the `konnect`
+3. Open the target board in PCB Editor, then click
+   **Tools → External Plugins → Konnect**. This records the socket and optional
+   API token in Konnect's private per-user cache. If several PCB Editor processes
+   are running, click this action in the process you want to control.
+4. Confirm your AI client (Claude Code, Claude Desktop, …) has the `konnect`
    MCP server registered in its own config (`.mcp.json` or
    `claude_desktop_config.json`) pointing at the `konnect` binary — see
    [examples/](../examples/). This registration is separate from the KiCAD
-   plugin settings.
-6. Restart the AI client session so it spawns a fresh Konnect process that
-   reads the saved settings.
-7. Verify: have the AI call `open_project`. Expected:
+   action.
+5. Restart the AI client session so it spawns a fresh Konnect process and
+   restores the registered instance.
+6. Verify: have the AI call `open_project`. Expected:
 
    ```json
    { "kicad_ui_running": true, "message": "KiCAD is running and IPC is available." }
    ```
 
-Alternative: launching the server from within KiCAD sets `KICAD_API_SOCKET`
-automatically, and a `konnect-settings.json` passed via `--config` can carry
-`ipc_socket_path` directly.
+Alternative: set `KICAD_API_SOCKET` (and `KICAD_API_TOKEN` when required) in the
+MCP process environment. These explicit values take precedence over discovery.
+The optional **Konnect Settings** Python action can also start a local Streamable
+HTTP endpoint at `http://127.0.0.1:3000/mcp`.
 
 ## PCB tools return "IPC connect failed" / "No PCB document is open"
 
@@ -50,8 +48,19 @@ KiCAD first, and make sure the API is enabled (previous section).
 ## "kicad-cli not found"
 
 Common install paths are auto-detected (including the Windows registry). If
-your install is somewhere unusual, set the path in the plugin settings dialog
-or in `konnect-settings.json` (`kicad_cli`).
+your install is somewhere unusual, set `KICAD_CLI` or configure `kicad_cli` in
+the server config file. On Linux the default is
+`$XDG_CONFIG_HOME/konnect/config.toml` (normally `~/.config/konnect/config.toml`).
+
+On Linux, verify that the native CLI and standard symbol libraries are installed:
+
+```bash
+kicad-cli --version
+test -d /usr/share/kicad/symbols
+```
+
+Arch/CachyOS users need the separate `kicad-library` package. Ubuntu users of the
+official KiCAD PPA need `kicad-library-all`. See [Linux support](LINUX.md).
 
 ## Plugin doesn't appear in KiCAD
 

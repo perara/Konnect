@@ -1,11 +1,10 @@
-mod config;
 mod install;
 mod manifest;
 mod transport;
 
 use anyhow::Result;
-use config::{Config, TransportMode};
 use konnect_core::mcp::handler::McpHandler;
+use konnect_plugin::config::{self, Config, TransportMode};
 use std::io::IsTerminal;
 use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -20,6 +19,14 @@ async fn main() -> Result<()> {
         Some("init") => return install::run_install(),
         Some("uninstall") => return install::run_uninstall(),
         Some("status") => return install::print_status(),
+        Some("register-kicad") => {
+            let path = config::register_kicad_instance()?;
+            println!(
+                "Registered this KiCAD instance for Konnect at {}",
+                path.display()
+            );
+            return Ok(());
+        }
         Some("skill") => {
             let name = args.get(2).map(String::as_str).unwrap_or("");
             return install::print_skill_content(name);
@@ -46,6 +53,11 @@ async fn main() -> Result<()> {
     if install::needs_install() {
         let _ = install::run_install_silent();
     }
+
+    // An executable launched from KiCAD receives its instance-specific API
+    // socket and token. A separately-launched MCP server restores the most
+    // recently registered instance from the private per-user cache record.
+    config::restore_kicad_instance_environment();
 
     // --config <path>: load config from specified file
     let config_path = args
@@ -118,6 +130,7 @@ fn print_help() {
     println!("  konnect init             Install skills, agents, and hooks");
     println!("  konnect uninstall        Remove all installed files");
     println!("  konnect status           Show install state");
+    println!("  konnect register-kicad   Register the KiCAD instance that launched this action");
     println!("  konnect skill <name>     Print skill content (for hooks)");
     println!("  konnect --config <path>  Start server with config file");
     println!("  konnect --version        Print version");

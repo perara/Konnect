@@ -53,7 +53,11 @@ if ($ViewerPath -and (Test-Path $ViewerPath)) {
 # binary it actually bundles (build-pcm.sh stamps bin/konnect for macOS/Linux).
 $pluginManifest = Get-Content "$staging/plugins/plugin.json" -Raw | ConvertFrom-Json
 foreach ($action in $pluginManifest.actions) {
-    if ($action.entrypoint -like "bin/*") { $action.entrypoint = "bin/konnect.exe" }
+    if ($action.entrypoint -like "bin/*") {
+        $parts = $action.entrypoint -split " ", 2
+        $action.entrypoint = "bin/konnect.exe"
+        if ($parts.Count -eq 2) { $action.entrypoint += " " + $parts[1] }
+    }
 }
 $pluginManifest | ConvertTo-Json -Depth 10 | Set-Content "$staging/plugins/plugin.json"
 
@@ -69,6 +73,8 @@ $metadata = Get-Content "$repoRoot/packaging/metadata.json" -Raw | ConvertFrom-J
 $metadata.versions[0].version = $Version
 $installSize = (Get-ChildItem $staging -Recurse -File | Measure-Object Length -Sum).Sum
 $metadata.versions[0] | Add-Member -NotePropertyName install_size -NotePropertyValue ([long]$installSize) -Force
+$metadata.versions[0] | Add-Member -NotePropertyName platforms -NotePropertyValue @("windows") -Force
+$metadata.versions[0] | Add-Member -NotePropertyName runtime -NotePropertyValue "ipc" -Force
 foreach ($field in @("download_sha256", "download_url", "download_size")) {
     $metadata.versions[0].PSObject.Properties.Remove($field)
 }
@@ -76,7 +82,7 @@ $metadata | ConvertTo-Json -Depth 10 | Set-Content "$staging/metadata.json"
 
 # Zip it
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-$zipPath = Join-Path (Resolve-Path $OutDir) "konnect-pcm-v$Version.zip"
+$zipPath = Join-Path (Resolve-Path $OutDir) "konnect-pcm-windows-v$Version.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path "$staging/*" -DestinationPath $zipPath
 
@@ -88,4 +94,4 @@ Write-Host "PCM package: $zipPath"
 Write-Host "  download_size:   $size"
 Write-Host "  install_size:    $installSize"
 Write-Host "  download_sha256: $sha"
-Write-Host "  download_url:    https://github.com/mixelpixx/Konnect/releases/download/v$Version/konnect-pcm-v$Version.zip"
+Write-Host "  download_url:    https://github.com/perara/Konnect/releases/download/v$Version/konnect-pcm-windows-v$Version.zip"

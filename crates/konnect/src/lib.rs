@@ -3,7 +3,7 @@
 //! When compiled as a cdylib, this crate exposes a C-compatible ABI that
 //! a thin Python action plugin (or KiCAD PCM package) can load.
 
-mod config;
+pub mod config;
 mod ffi;
 mod transport;
 

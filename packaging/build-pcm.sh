@@ -65,7 +65,9 @@ if [ ! -f "$binary" ]; then
     exit 1
 fi
 
-staging="$(mktemp -d)/konnect-pcm-$version"
+temp_root="$(mktemp -d)"
+trap 'rm -rf "$temp_root"' EXIT
+staging="$temp_root/konnect-pcm-$version"
 mkdir -p "$staging/plugins/bin" "$staging/plugins/resources" "$staging/resources"
 
 # Plugin files
@@ -93,15 +95,15 @@ path, entry = sys.argv[1], sys.argv[2]
 m = json.load(open(path))
 for a in m.get("actions", []):
     if a.get("entrypoint", "").startswith("bin/"):
-        a["entrypoint"] = entry
+        suffix = a["entrypoint"].split(" ", 1)
+        a["entrypoint"] = entry + (" " + suffix[1] if len(suffix) == 2 else "")
 json.dump(m, open(path, "w"), indent=2)
 open(path, "a").write("\n")
 PY
 
-# metadata.json: stamp version + install_size; download_* get schema-valid
-# placeholders (PCM ignores them for install-from-file; the printed values below
-# go into the kicad-addons repository submission). install_size is the staged
-# file total BEFORE metadata.json is written, matching build-pcm.ps1.
+# metadata.json: stamp version, platform, runtime, and install_size. download_*
+# fields are omitted inside the archive as required by KiCAD; the real values
+# printed below belong in the external add-on repository metadata.
 install_size="$(python3 -c 'import os,sys; print(sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk(sys.argv[1]) for f in fs))' "$staging")"
 python3 - "$repo_root/packaging/metadata.json" "$staging/metadata.json" "$version" "$install_size" <<'PY'
 import json, sys
@@ -110,16 +112,18 @@ m = json.load(open(src))
 v = m["versions"][0]
 v["version"] = version
 v["install_size"] = int(install_size)
-v["download_sha256"] = "0" * 64
-v["download_url"] = "https://example.invalid/placeholder.zip"
-v["download_size"] = 1
+v["platforms"] = ["linux"]
+v["runtime"] = "ipc"
+for field in ("download_sha256", "download_url", "download_size"):
+    v.pop(field, None)
 json.dump(m, open(dst, "w"), indent=2)
 open(dst, "a").write("\n")
 PY
 
 # Zip it (staged contents at the archive root, matching Compress-Archive)
 mkdir -p "$out_dir"
-zip_path="$out_dir/konnect-pcm-v$version.zip"
+out_dir="$(cd "$out_dir" && pwd)"
+zip_path="$out_dir/konnect-pcm-linux-v$version.zip"
 rm -f "$zip_path"
 ( cd "$staging" && zip -rqX "$zip_path" metadata.json plugins resources )
 
@@ -135,4 +139,4 @@ echo "PCM package: $zip_path"
 echo "  download_size:   $size"
 echo "  install_size:    $install_size"
 echo "  download_sha256: $sha"
-echo "  download_url:    https://github.com/mixelpixx/Konnect/releases/download/v$version/konnect-pcm-v$version.zip"
+echo "  download_url:    https://github.com/perara/Konnect/releases/download/v$version/konnect-pcm-linux-v$version.zip"

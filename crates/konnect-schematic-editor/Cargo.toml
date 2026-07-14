@@ -8,6 +8,7 @@ description = "Typed KiCAD schematic parser and manipulator with lossless round-
 
 [dependencies]
 thiserror.workspace = true
+dirs.workspace = true
 uuid.workspace = true
 konnect-sexp.workspace = true  # For geometry (pin transforms, snap, T-junction detection)
 

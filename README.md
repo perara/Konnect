@@ -38,7 +38,7 @@ Konnect, a tool call is a function call. One process, one language, no plumbing.
 **The dependency surface was enormous.** Running the original means carrying Node.js
 and its npm tree, Python and its pip packages, wxPython, kicad-skip, and KiCAD's
 SWIG bindings — two package ecosystems plus a binding layer, every one of them a
-moving target that can break an install. Konnect is a single static binary, about
+moving target that can break an install. Konnect is a single native binary, about
 5 MB. There is nothing to install alongside it and nothing to version-match.
 
 **SWIG is a dead end.** The original's PCB backend depends on KiCAD's SWIG Python
@@ -97,9 +97,12 @@ The full tool catalog is documented in [tool-directory.md](tool-directory.md).
 
 ### From the KiCAD Plugin Manager (recommended)
 
-1. Download `konnect-pcm-v<version>.zip` from [Releases](https://github.com/mixelpixx/Konnect/releases)
-   (the `konnect-pcm-*` asset is the KiCAD plugin package; the other archives are
-   standalone server binaries)
+1. Download the PCM archive for your operating system from
+   [Releases](https://github.com/perara/Konnect/releases):
+   - Windows: `konnect-pcm-windows-v<version>.zip`
+   - Linux: `konnect-pcm-linux-v<version>.zip`
+   - The `.tar.gz`/standalone archives are for MCP clients that do not need the
+     KiCAD toolbar integration.
 2. Open KiCAD 10 → **Plugin and Content Manager**
 3. Click **Install from File** and select the zip
 4. Restart KiCAD
@@ -111,16 +114,23 @@ Verify: open the **PCB Editor** → **Tools → External Plugins** → you shoul
 
 ```bash
 # protoc is required (protobuf code generation)
-# Windows: choco install protoc / macOS: brew install protobuf / Linux: apt install protobuf-compiler
+# Windows: choco install protoc / macOS: brew install protobuf
+# Debian/Ubuntu: apt install protobuf-compiler libprotobuf-dev
 cargo build --release -p konnect
 ```
 
+Linux source builds also need a C/C++ toolchain, CMake, and `pkg-config`. Building
+the schematic viewer requires GTK3 and WebKitGTK 4.1 development packages. See
+[Linux support](docs/LINUX.md) for per-distribution commands.
+
 ## Setup with Claude Desktop
 
-After a PCM install, the server binary lives in your KiCAD documents folder:
+After a PCM install, the server binary lives in your KiCAD user-data folder. Typical
+locations are:
 
 ```
-C:\Users\<YOU>\Documents\KiCad\10.0\3rdparty\plugins\com_github_mixelpixx_konnect\bin\konnect.exe
+Windows: C:\Users\<YOU>\Documents\KiCad\10.0\3rdparty\plugins\com_github_mixelpixx_konnect\bin\konnect.exe
+Linux:  ~/.local/share/KiCad/10.0/3rdparty/plugins/com_github_mixelpixx_konnect/bin/konnect
 ```
 
 Edit `%APPDATA%\Claude\claude_desktop_config.json`:
@@ -135,15 +145,21 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop and the Konnect tools appear. For Claude Code, drop the same
-snippet into a `.mcp.json` in your project root (see [examples/](examples/)).
+On Linux, use the same JSON shape with the absolute path to the `konnect` ELF binary
+(no `.exe`). Restart the MCP client and the Konnect tools appear. For Claude Code,
+drop the snippet into a `.mcp.json` in your project root. Platform-specific examples
+are in [examples/](examples/).
 
 ## Schematic viewer
 
 A standalone viewer that auto-refreshes as the schematic file changes:
 
 ```bash
+# Windows
 schematic-viewer.exe path\to\your\root_schematic.kicad_sch
+
+# Linux
+schematic-viewer path/to/your/root_schematic.kicad_sch
 ```
 
 Point it at the root sheet of a hierarchical design and every sub-sheet is rendered
@@ -154,16 +170,20 @@ viewer never blocks KiCAD from saving. Pan with click-drag, zoom with the wheel,
 `0` to fit, `R` to refresh, drag-and-drop to open a different file. Also launchable
 by the AI via the `open_schematic_viewer` tool.
 
-Needs the WebView2 runtime (pre-installed on Windows 10/11) and a KiCAD install for
+Needs WebView2 on Windows or GTK3 + WebKitGTK 4.1 on Linux, plus a KiCAD install for
 `kicad-cli` (auto-discovered, or pass `--kicad-cli <path>`). Built separately from
 the main workspace — see [DEV.md](DEV.md) for build steps.
 
 ## Requirements
 
-- KiCAD 10 (Windows today; Linux and macOS builds are on the [roadmap](ROADMAP.md) —
-  the code already compiles and passes tests on all three platforms in CI)
+- KiCAD 10 on Windows or Linux
 - `kicad-cli` (ships with KiCAD — used for exports, ERC, DRC)
+- Standard KiCAD symbols and footprints (`kicad-library` on Arch/CachyOS,
+  `kicad-library-all` from the official KiCAD Ubuntu PPA)
 - For PCB tools: KiCAD running with the target board open (IPC API)
+
+Linux installation, distro compatibility, Flatpak/Snap notes, and diagnostics are
+documented in [docs/LINUX.md](docs/LINUX.md).
 
 ## License: free for the little guys
 
@@ -201,12 +221,11 @@ manual copy), then restart KiCAD.
 **PCB tools return "IPC connect failed"** — open KiCAD with your board file first;
 PCB tools talk to the running PCB editor.
 
-**"kicad-cli not found"** — common install paths are auto-detected; set the path
-explicitly in the plugin settings dialog or your `konnect-settings.json` if yours
-is elsewhere.
+**"kicad-cli not found"** — common install paths are auto-detected; set `KICAD_CLI`
+or set `kicad_cli` in `~/.config/konnect/config.toml` on Linux if yours is elsewhere.
 
 ## Support
 
-- Issues & feature requests: [GitHub Issues](https://github.com/mixelpixx/Konnect/issues)
+- Issues & feature requests: [GitHub Issues](https://github.com/perara/Konnect/issues)
 - Roadmap: [ROADMAP.md](ROADMAP.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
