@@ -54,6 +54,24 @@ jobs:
           KONNECT_E2E_KEEP_DIR: ${{ github.workspace }}/e2e-artifacts-linux
         run: cargo test --locked -p konnect --test e2e_kicad -- --ignored --nocapture
 
+      - name: KiCad Python action-plugin smoke
+        shell: bash
+        run: |
+          cargo build --locked -p konnect
+          plugin_root="${RUNNER_TEMP}/konnect-python-plugin"
+          cache_root="${RUNNER_TEMP}/konnect-python-plugin-cache"
+          socket_root="${RUNNER_TEMP}/konnect-python-plugin-socket"
+          rm -rf "$plugin_root" "$cache_root" "$socket_root"
+          cp -R plugin "$plugin_root"
+          mkdir -p "$plugin_root/bin" "$socket_root"
+          install -m755 target/debug/konnect "$plugin_root/bin/konnect"
+          touch "$socket_root/api.sock"
+          XDG_CACHE_HOME="$cache_root" \
+          KICAD_API_SOCKET="ipc://$socket_root/api.sock" \
+          KICAD_API_TOKEN="ci-smoke-token" \
+            xvfb-run -a python3 packaging/smoke-test-kicad-python-plugin.py \
+              --plugin-dir "$plugin_root"
+
       - name: Demo-corpus conformance
         run: cargo test --locked -p konnect-core --test conformance_test -- --nocapture
 

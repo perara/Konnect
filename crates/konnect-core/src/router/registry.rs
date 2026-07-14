@@ -8,7 +8,7 @@ use crate::tools::ToolDef;
 
 /// Toolsets auto-loaded when the server starts.
 ///
-/// Kept minimal so that baseline `tools/list` context stays small (~17 tools
+/// Kept minimal so that baseline `tools/list` context stays small (~19 tools
 /// including meta-tools ≈ 2K tokens). The LLM expands its toolbelt on demand
 /// via `load_toolset(...)`.
 ///
@@ -116,7 +116,7 @@ pub static ALL_TOOLSETS: &[ToolsetMeta] = &[
     },
     ToolsetMeta {
         name: "templates",
-        description: "Reference circuit library: USB-C, LDO, buck converter, STM32, I2C, LED — verified component values",
+        description: "Curated reference circuit templates: USB-C, LDO, buck converter, STM32, I2C, LED",
         category: "templates",
         tool_count: 4,
     },

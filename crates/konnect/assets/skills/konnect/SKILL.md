@@ -55,7 +55,7 @@ Only to answer questions not available through exports (sheet hierarchy, title b
 | "Add a 100nF cap to U3 VCC" | 1 | `load_toolset("sch_components")` + `load_toolset("sch_wiring")` |
 | "Rename net /CLK to /SYS_CLK" | 1 | Warn about downstream effects, then MCP tools |
 | "Run DRC" | 1 | `load_toolset("verification")` then `run_drc` |
-| "Export Gerbers" | 1 | `load_toolset("export")` then export tools |
+| "Export Gerbers" | 1 | `load_toolset("pcb_export")` then `export_gerber` |
 | "Just patch line 247 of the .kicad_sch" | REFUSE | Explain risks, offer MCP alternative |
 | "Add ESD protection to USB lines" | 1 | `load_toolset("sch_components")` + `load_toolset("sch_wiring")` |
 | "Check if board is ready for fab" | 2 | Load `verification` + `design_review` toolsets |
@@ -72,26 +72,25 @@ Only to answer questions not available through exports (sheet hierarchy, title b
 
 ## Discovery — Finding Available Tools
 
-Konnect uses a meta-tool router pattern with 177 tools across 17 toolsets. Tools are loaded on demand to keep the context focused.
+Konnect uses a meta-tool router pattern with 185 toolset tools across 18 toolsets, plus 6 always-visible meta-tools (191 total). Toolsets are loaded on demand to keep the context focused.
 
 ```
 list_toolboxes          → See all available toolsets with descriptions
-load_toolset("name")    → Activate a toolset, exposing its tools
+load_toolset(<toolset>)   → Activate a toolset, exposing its tools
 get_active_toolsets     → See what's currently loaded
-unload_toolset("name")  → Remove a toolset when done
+unload_toolset(<toolset>) → Remove a toolset when done
 ```
 
 ### Available Toolsets
 
 | Category | Toolsets |
 |----------|----------|
-| Schematic | sch_components, sch_wiring, sch_batch, sch_analysis, sch_hierarchy |
-| PCB | pcb_layout, pcb_routing, pcb_zones, pcb_components |
+| Schematic | sch_components, sch_wiring, sch_analysis, sch_batch, sch_export, sch_hierarchy |
+| PCB | pcb_board, pcb_components, pcb_routing, pcb_export |
 | Verification | verification, design_review |
-| Libraries | libraries, templates |
+| Libraries and sourcing | library, integration, templates |
 | Project | project, config |
-| Export | export |
-| Advanced | advanced |
+| Production | manufacturing |
 
 ## Design Rules Quick Reference
 

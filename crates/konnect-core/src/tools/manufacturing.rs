@@ -1,14 +1,15 @@
 //! `manufacturing` toolset — Design-to-fab pipeline: export packages, cost estimation, validation.
 //!
 //! Orchestrates gerber export, BOM generation, and pick-and-place file creation
-//! into a single manufacturing-ready package for a specific fab house.
+//! into a single candidate package for a specific fab house. Formal checks and
+//! independent artifact review remain required before ordering.
 
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, ToolContext, ToolDef};
 use serde_json::json;
 use std::path::PathBuf;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use super::cli;
 
@@ -18,9 +19,9 @@ pub fn tools() -> Vec<ToolDef> {
     vec![
         tool!(
             "export_manufacturing_package",
-            "Generate ALL files needed for PCB fabrication and assembly in one call: \
-             Gerbers, drill files, BOM (fab-house format), and pick-and-place positions. \
-             Targets a specific fab house (JLCPCB, PCBWay, etc.).",
+            "Generate a candidate fabrication bundle: Gerbers and drill files, plus BOM and \
+             pick-and-place positions when assembly is requested. Any failed requested export \
+             makes the tool call fail; inspect the generated artifacts before ordering.",
             json!({
                 "type": "object",
                 "properties": {
@@ -49,13 +50,14 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "validate_for_manufacturing",
-            "Pre-flight check before ordering: verifies the design is ready for the target \
-             fab house. Checks board outline, design rules, BOM completeness, and assembly constraints.",
+            "Run file-level pre-flight heuristics for board-outline presence, footprints, \
+             minimum trace width, and an obvious completely-unrouted board. Run DRC and review \
+             generated manufacturing files before ordering.",
             json!({
                 "type": "object",
                 "properties": {
                     "board": { "type": "string", "description": "Path to .kicad_pcb file" },
-                    "schematic": { "type": "string", "description": "Path to .kicad_sch file (optional, for BOM checks)" },
+                    "schematic": { "type": "string", "description": "Reserved for future BOM validation; currently ignored" },
                     "fab_house": {
                         "type": "string",
                         "description": "Target manufacturer: 'jlcpcb', 'pcbway', 'oshpark'",
@@ -68,8 +70,8 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "estimate_cost",
-            "Estimate the total manufacturing cost for PCB fabrication and assembly at a given fab house. \
-             Returns itemized breakdown: PCB, components, assembly, and total.",
+            "Return a rough static cost heuristic for PCB fabrication and assembly. This does \
+             not use live fab-house pricing or real component prices and is not a quote.",
             json!({
                 "type": "object",
                 "properties": {
@@ -126,7 +128,7 @@ async fn handle_export_manufacturing_package(
     // 1. Export Gerbers
     let gerber_dir = output_dir.join("gerbers");
     tokio::fs::create_dir_all(&gerber_dir).await?;
-    match cli::export_gerber(cli_path, &board, &gerber_dir).await {
+    match cli::export_gerber(cli_path, &board, &gerber_dir, &[]).await {
         Ok(()) => {
             info!("[BETA] Gerber export succeeded");
             files_generated.push(json!({
@@ -141,18 +143,17 @@ async fn handle_export_manufacturing_package(
     }
 
     // 2. Export drill files
-    let drill_path = output_dir.join("drill.drl");
-    match cli::export_drill(cli_path, &board, &drill_path).await {
+    match cli::export_drill(cli_path, &board, &output_dir).await {
         Ok(()) => {
             info!("[BETA] Drill export succeeded");
             files_generated.push(json!({
                 "type": "drill",
-                "path": drill_path.to_str().unwrap_or("")
+                "path": output_dir.to_str().unwrap_or("")
             }));
         }
         Err(e) => {
-            warn!(error = %e, "[BETA] Drill export failed (may be included in gerbers)");
-            // Not critical — some gerber exports include drill
+            error!(error = %e, "[BETA] Drill export failed");
+            warnings.push(format!("Drill export failed: {}", e));
         }
     }
 
@@ -164,7 +165,8 @@ async fn handle_export_manufacturing_package(
             _ => "csv",
         };
         let pos_path = output_dir.join(format!("positions.{}", pos_format));
-        match cli::export_position_file(cli_path, &board, &pos_path, pos_format).await {
+        match cli::export_position_file(cli_path, &board, &pos_path, pos_format, "both", "mm").await
+        {
             Ok(()) => {
                 info!("[BETA] Position file export succeeded");
                 files_generated.push(json!({
@@ -182,7 +184,7 @@ async fn handle_export_manufacturing_package(
         // BOM
         if let Some(ref sch) = schematic {
             let bom_path = output_dir.join("bom.csv");
-            match cli::export_bom(cli_path, sch, &bom_path, "csv").await {
+            match cli::export_bom(cli_path, sch, &bom_path, "csv", true).await {
                 Ok(()) => {
                     info!("[BETA] BOM export succeeded");
                     files_generated.push(json!({
@@ -233,22 +235,26 @@ async fn handle_export_manufacturing_package(
         "[BETA] Manufacturing package complete"
     );
 
-    Ok(CallToolResult::text(
-        serde_json::to_string_pretty(&json!({
+    let succeeded = warnings.is_empty();
+    let report = serde_json::to_string_pretty(&json!({
             "fab_house": fab_house,
             "output_dir": output_dir.to_str().unwrap_or(""),
             "files": all_files,
             "files_generated": files_generated,
             "warnings": warnings,
             "summary": summary,
-            "next_steps": format!(
-                "Upload the contents of {} to {}'s order page. Gerbers go in the PCB order, BOM + positions go in the assembly order.",
-                output_dir.display(),
-                fab_house.to_uppercase()
-            )
+            "next_steps": if succeeded {
+                "Run formal ERC/DRC, inspect every generated layer/drill/BOM/position file, and review the fab-house upload previews before ordering.".to_string()
+            } else {
+                "Fix every warning and regenerate the complete package before upload.".to_string()
+            }
         }))
-        .unwrap(),
-    ))
+        .unwrap();
+    if succeeded {
+        Ok(CallToolResult::text(report))
+    } else {
+        Ok(CallToolResult::error(report))
+    }
 }
 
 async fn handle_validate_for_manufacturing(
@@ -371,6 +377,9 @@ async fn handle_estimate_cost(
     let board = get_path(args, "board")?;
     let fab_house = args["fab_house"].as_str().unwrap_or("jlcpcb");
     let quantity = args["quantity"].as_u64().unwrap_or(5) as usize;
+    if quantity == 0 {
+        anyhow::bail!("quantity must be at least 1");
+    }
 
     info!(
         board = %board.display(),
@@ -454,7 +463,7 @@ async fn handle_estimate_cost(
             },
             "notes": [
                 "Estimates are approximate — actual cost depends on board size, finish, and specific components",
-                "Component costs are rough averages — use generate_bom with supply chain data for accurate pricing",
+                "Component costs are rough averages — export the BOM and obtain current supplier/fab-house pricing",
                 format!("Based on {} quantity from {}", quantity, fab_house.to_uppercase())
             ],
             "disclaimer": "BETA: Cost estimates are indicative only. Always confirm with the fab house's online quoting tool."
@@ -541,4 +550,54 @@ fn extract_coord(block: &str, keyword: &str, index: usize) -> Option<f64> {
     let rest = &block[pos..];
     let parts: Vec<&str> = rest.split([' ', ')']).collect();
     parts.get(index)?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::router::ToolRouter;
+    use crate::tools::ServerConfig;
+    use std::sync::Arc;
+
+    fn context_without_cli() -> ToolContext {
+        ToolContext::new(
+            ServerConfig {
+                kicad_cli: String::new(),
+                kicad_binary: String::new(),
+                ipc_address: String::new(),
+                project_dir: None,
+                jlcpcb_db_path: None,
+            },
+            Arc::new(ToolRouter::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn package_reports_failed_requested_exports_as_tool_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board.kicad_pcb");
+        std::fs::write(&board, "(kicad_pcb (version 20250610))").unwrap();
+        let result = handle_export_manufacturing_package(
+            &json!({
+                "board": board,
+                "output_dir": dir.path().join("output"),
+                "include_assembly": false
+            }),
+            &context_without_cli(),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn cost_estimate_rejects_zero_quantity() {
+        let error = handle_estimate_cost(
+            &json!({"board": "unused.kicad_pcb", "quantity": 0}),
+            &context_without_cli(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("at least 1"));
+    }
 }

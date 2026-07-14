@@ -1,80 +1,41 @@
 # Pre-Fabrication Design Checklist
 
-## Schematic Review
+Adapt this checklist to the circuit requirements, component datasheets, selected stackup, manufacturer, enclosure, and assembly process. A checked box should have evidence; generic rules of thumb are not substitutes for device requirements.
 
-### Power
-- [ ] Every IC has decoupling cap (100nF minimum, close to VCC/GND pins)
-- [ ] Bulk capacitor on each power rail (10µF–100µF at entry point)
-- [ ] Power indicator LED (optional but recommended for debug)
-- [ ] Reverse polarity protection on external power input
-- [ ] Voltage regulator output cap per datasheet recommendation
-- [ ] PWR_FLAG on power nets without power-output pins (prevents ERC error)
+## Schematic
 
-### Signal Integrity
-- [ ] I2C lines have pull-up resistors (4.7k for 100kHz, 2.2k for 400kHz)
-- [ ] SPI chip select lines have pull-ups (prevent floating during boot)
-- [ ] Reset pins have RC filter (100nF + 10k pull-up)
-- [ ] Unused op-amp inputs tied to known state
-- [ ] Crystal load caps match crystal specification
-- [ ] ADC reference has dedicated decoupling
+- [ ] Power rails, voltage/current margins, sequencing, reverse/back-power paths, and protection were reviewed.
+- [ ] Decoupling and bulk capacitance values/topology follow each device's datasheet and load-transient needs.
+- [ ] Regulators, references, crystals, analog networks, terminations, and bias components follow authoritative designs/calculations.
+- [ ] External interfaces have requirement-appropriate ESD/EMC and fault protection.
+- [ ] Inputs have defined states when required; intentional unused pins are handled per the datasheet and marked no-connect where appropriate.
+- [ ] References, values, footprints, pin mappings, polarity, ratings, and sourcing fields were checked.
+- [ ] `find_orphan_items`, `find_shorted_nets`, `find_single_pin_nets`, `validate_wire_connections`, and `validate_component_connections` findings were reviewed.
+- [ ] Formal `run_erc` results are resolved or explicitly waived.
 
-### Protection
-- [ ] ESD protection on external-facing interfaces (USB, Ethernet, GPIO headers)
-- [ ] TVS diodes on power inputs (if external power)
-- [ ] Current limiting resistors on LEDs
-- [ ] Gate resistors on MOSFET drivers (prevent ringing)
+Single-pin nets and unconnected pins are review prompts, not automatically defects; intentional test points, NC pins, and hierarchical intent require context.
 
-### Connectivity
-- [ ] No unconnected pins (except NC pins marked with no-connect)
-- [ ] No floating inputs on logic ICs
-- [ ] All nets have at least 2 connections (no single-pin nets)
-- [ ] No shorted nets (distinct nets accidentally merged)
+## PCB
 
-## PCB Review
+- [ ] Board outline, cutouts, dimensions, mounting, connectors, keepouts, and enclosure fit were checked.
+- [ ] Footprints and pad numbering match datasheets and physical parts.
+- [ ] Placement satisfies electrical, thermal, mechanical, courtyard, rework, and assembly needs.
+- [ ] Routing is complete and current/impedance/return-path requirements were checked against the real stackup.
+- [ ] Differential pairs were inspected for topology, reference plane, spacing, skew/length, and discontinuities; tool-generated parallel geometry alone is not proof.
+- [ ] Zones are refilled and plane continuity/thermal relief/copper islands were reviewed.
+- [ ] Drill, annular ring, clearances, mask, paste, silkscreen, edge, and special-process geometry meet the selected manufacturer's current rules.
+- [ ] Polarity/pin-1 markings, designators, fiducials, tooling needs, and test access suit the assembly plan.
+- [ ] Formal `run_drc` results are resolved or explicitly waived.
 
-### Mechanical
-- [ ] Board outline is closed (no gaps)
-- [ ] Mounting holes placed and correct diameter
-- [ ] Connector positions accessible from enclosure
-- [ ] Keep-out zones around antennas/RF sections
-- [ ] Board dimensions match enclosure
+## Konnect coverage
 
-### Routing
-- [ ] No unrouted nets (ratsnest clear)
-- [ ] Power traces adequately sized for current
-- [ ] Differential pairs length-matched (USB, Ethernet)
-- [ ] No acute angles on traces (acid traps)
-- [ ] Via-in-pad only where needed (adds cost)
-- [ ] Ground pour on back (or both sides)
+| Check | Tool or evidence |
+|-------|------------------|
+| Structural schematic issues | `sch_analysis` and `sch_batch` validation tools |
+| Formal electrical rules | `sch_export.run_erc` |
+| Formal board rules | `verification.run_drc` |
+| Heuristic circuit/DFM prompts | `design_review.run_design_review` |
+| File-level manufacturing pre-flight | `manufacturing.validate_for_manufacturing` |
+| ESD, SI/PI, thermal, mechanical, and datasheet compliance | Manual/independent engineering evidence |
 
-### DFM (Design for Manufacturing)
-- [ ] All traces/spaces meet fab house minimums
-- [ ] All holes meet minimum drill size
-- [ ] Annular rings adequate
-- [ ] Silkscreen not overlapping pads
-- [ ] Component courtyard no overlaps
-- [ ] Thermal relief on ground pour connections
-- [ ] Fiducial markers (for assembly, 3 minimum)
-
-### Assembly
-- [ ] All components have correct footprints
-- [ ] Polarity markings visible (caps, diodes, ICs)
-- [ ] Reference designators readable
-- [ ] Component values on silkscreen (or fab layer)
-- [ ] Test points accessible for debug
-
-## Using Konnect for Review
-
-| Check | Tool |
-|-------|------|
-| Unconnected pins | `find_orphan_items` |
-| Shorted nets | `find_shorted_nets` |
-| Single-pin nets | `find_single_pin_nets` |
-| ERC violations | `run_erc` |
-| DRC violations | `get_drc_violations` |
-| Decoupling audit | `audit_decoupling` |
-| Connection audit | `audit_connections` |
-| Power rail audit | `audit_power_rails` |
-| ESD audit | `audit_esd_protection` |
-| DFM audit | `audit_manufacturing` |
-| Full review | `run_design_review` |
+`run_design_review` does not include formal ERC/DRC and does not verify the manual engineering items in the last row.

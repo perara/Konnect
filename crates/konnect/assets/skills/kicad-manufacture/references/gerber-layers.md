@@ -26,31 +26,16 @@
 
 ## What `export_gerber` Produces
 
-The `export_gerber` tool generates all required files in one call:
-- All copper layers present in the design
-- Both mask layers
-- Both silkscreen layers
-- Both paste layers
-- Edge.Cuts (board outline)
-- Drill file(s)
+`export_gerber` invokes KiCAD's Gerber export for the requested layer list (or KiCAD's applicable defaults when the list is empty). Its `drill_file` option also runs the dedicated Excellon drill export. Always enumerate the generated directory: do not assume that every listed fabrication layer or both PTH/NPTH outputs exist merely because the call succeeded.
 
 ## What Fab Houses Expect
 
-### JLCPCB Upload
-Upload a single `.zip` containing all Gerber + drill files.
-JLCPCB auto-detects layers by extension or content.
-
-### PCBWay Upload
-Same as JLCPCB — single zip with all Gerbers.
-
-### OSH Park Upload
-Upload the `.kicad_pcb` file directly (they parse it themselves).
-Or upload Gerber zip.
+Check the selected manufacturer's current upload instructions. Accepted containers, naming, required layers, drill separation, job files, and direct KiCAD-file support can change by service.
 
 ## Verification Checklist
 
 Before uploading Gerbers:
-1. `get_drc_violations` — zero errors
+1. Formal `run_drc` — resolve errors or document explicit waivers
 2. `export_3d` — visual check of the 3D model
 3. Open Gerbers in a viewer (KiCAD's built-in, or gerbv)
 4. Verify board outline is closed (no gaps in Edge.Cuts)

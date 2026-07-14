@@ -922,7 +922,7 @@ async fn handle_add_power_symbol(
 
     // Embed the power symbol definition in lib_symbols
     let lib_id = format!("power:{}", power_net);
-    cse::library::ensure_lib_symbol(&mut sch, &lib_id);
+    cse::library::ensure_lib_symbol(&mut sch, &lib_id)?;
 
     // Build the Symbol struct
     let mut sym = cse::Symbol::new(format!("power:{}", power_net), x, y);

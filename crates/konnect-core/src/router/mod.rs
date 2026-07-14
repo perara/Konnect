@@ -261,4 +261,151 @@ mod tests {
             );
         }
     }
+
+    fn all_public_tool_names() -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        for meta in registry::ALL_TOOLSETS {
+            for tool in registry::tools_for(meta.name).unwrap() {
+                assert!(names.insert(tool.name.to_string()));
+            }
+        }
+        for tool in meta_tools::meta_tool_descriptions() {
+            assert!(names.insert(tool.name));
+        }
+        names
+    }
+
+    fn quoted_arguments<'a>(text: &'a str, prefix: &str, quote: char) -> Vec<&'a str> {
+        let mut values = Vec::new();
+        let needle = format!("{prefix}{quote}");
+        let mut rest = text;
+        while let Some(start) = rest.find(&needle) {
+            let value_start = start + needle.len();
+            let tail = &rest[value_start..];
+            if let Some(end) = tail.find(quote) {
+                values.push(&tail[..end]);
+                rest = &tail[end + quote.len_utf8()..];
+            } else {
+                break;
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn tool_directory_exactly_matches_public_registry() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let directory = std::fs::read_to_string(repo.join("tool-directory.md")).unwrap();
+        let documented: std::collections::BTreeSet<String> = directory
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("| `")?;
+                Some(rest.split('`').next()?.to_string())
+            })
+            .collect();
+        let public = all_public_tool_names();
+
+        assert_eq!(registry::ALL_TOOLSETS.len(), 18);
+        assert_eq!(public.len(), 191);
+        assert_eq!(
+            documented, public,
+            "tool-directory.md drifted from the registry"
+        );
+    }
+
+    #[test]
+    fn bundled_operational_docs_only_load_real_toolsets() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let roots = [
+            repo.join("crates/konnect/assets/skills"),
+            repo.join("crates/konnect/assets/agents"),
+        ];
+        let valid: std::collections::HashSet<&str> = registry::ALL_TOOLSETS
+            .iter()
+            .map(|meta| meta.name)
+            .collect();
+
+        fn markdown_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    markdown_files(&path, out);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        for root in roots {
+            markdown_files(&root, &mut files);
+        }
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let names = quoted_arguments(&text, "load_toolset(", '"')
+                .into_iter()
+                .chain(quoted_arguments(&text, "load_toolset(", '\''));
+            for name in names {
+                assert!(
+                    valid.contains(name),
+                    "{} loads nonexistent toolset '{}'",
+                    path.display(),
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repository_markdown_has_no_broken_inline_local_links() {
+        fn markdown_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("");
+                    if name != ".git" && name != "target" {
+                        markdown_files(&path, out);
+                    }
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        markdown_files(&repo, &mut files);
+
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut rest = text.as_str();
+            while let Some(open) = rest.find("](") {
+                let target_start = open + 2;
+                let tail = &rest[target_start..];
+                let Some(close) = tail.find(')') else { break };
+                let raw = tail[..close].trim().trim_matches(['<', '>']);
+                rest = &tail[close + 1..];
+
+                if raw.is_empty()
+                    || raw.starts_with('#')
+                    || raw.starts_with('/')
+                    || raw.contains("://")
+                    || raw.starts_with("mailto:")
+                {
+                    continue;
+                }
+                let target = raw.split('#').next().unwrap();
+                let resolved = path.parent().unwrap().join(target);
+                assert!(
+                    resolved.exists(),
+                    "{} links to missing local target '{}'",
+                    path.display(),
+                    raw
+                );
+            }
+        }
+    }
 }

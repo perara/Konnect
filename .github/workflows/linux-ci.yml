@@ -20,6 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Ubuntu 26.04 LTS
+            image: ubuntu:26.04
+            family: debian
           - name: Ubuntu 24.04 LTS
             image: ubuntu:24.04
             family: debian
@@ -28,6 +31,9 @@ jobs:
             family: debian
           - name: Debian 12
             image: debian:12
+            family: debian
+          - name: Debian 13
+            image: debian:13
             family: debian
           - name: Fedora 44
             image: fedora:44

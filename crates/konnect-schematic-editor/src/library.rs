@@ -10,7 +10,7 @@
 //! definition, and can inject it into a Schematic's `lib_symbols` section.
 
 use crate::sexp::{parser, SexpNode};
-use crate::Schematic;
+use crate::{Error, Result, Schematic};
 use std::path::PathBuf;
 
 /// Resolve a lib_id (e.g. "Device:R") to the full symbol S-expression string.
@@ -101,7 +101,7 @@ pub fn resolve_lib_symbol_node(lib_id: &str) -> Option<SexpNode> {
 /// If the symbol is already present (by name), does nothing.
 /// If the lib_symbols node doesn't exist in raw_other, creates one.
 /// Handles `(extends "ParentName")` — automatically embeds the parent symbol too.
-pub fn ensure_lib_symbol(schematic: &mut Schematic, lib_id: &str) {
+pub fn ensure_lib_symbol(schematic: &mut Schematic, lib_id: &str) -> Result<()> {
     // Check if already present
     let check_name = format!("\"{}\"", lib_id);
     let already_present = schematic.raw_other.iter().any(|node| {
@@ -113,14 +113,12 @@ pub fn ensure_lib_symbol(schematic: &mut Schematic, lib_id: &str) {
         }
     });
     if already_present {
-        return;
+        return Ok(());
     }
 
     // Resolve the symbol's raw text to check for (extends "ParentName")
-    let sym_raw = match resolve_lib_symbol(lib_id) {
-        Some(r) => r,
-        None => return,
-    };
+    let sym_raw = resolve_lib_symbol(lib_id)
+        .ok_or_else(|| Error::LibrarySymbolNotFound(lib_id.to_string()))?;
 
     // Check for (extends "ParentName") and resolve the parent too.
     // Note: sym_raw already has prefixed names (e.g. extends "MCU_Microchip_ATmega:ATmega48PV-10A")
@@ -130,16 +128,14 @@ pub fn ensure_lib_symbol(schematic: &mut Schematic, lib_id: &str) {
         if let Some(end) = after.find('"') {
             let parent_lib_id = &after[..end]; // Already has library prefix
             if parent_lib_id.contains(':') {
-                ensure_lib_symbol(schematic, parent_lib_id);
+                ensure_lib_symbol(schematic, parent_lib_id)?;
             }
         }
     }
 
     // Now resolve and embed the symbol itself
-    let sym_node = match resolve_lib_symbol_node(lib_id) {
-        Some(n) => n,
-        None => return,
-    };
+    let sym_node = resolve_lib_symbol_node(lib_id)
+        .ok_or_else(|| Error::LibrarySymbolNotFound(lib_id.to_string()))?;
 
     // Find or create the lib_symbols node
     let lib_syms_idx = schematic
@@ -162,6 +158,7 @@ pub fn ensure_lib_symbol(schematic: &mut Schematic, lib_id: &str) {
             schematic.raw_other.insert(0, lib_syms);
         }
     }
+    Ok(())
 }
 
 /// Extract a `(symbol "NAME" ...)` block from file content by balanced-paren matching.
@@ -242,4 +239,30 @@ pub fn find_symbol_dirs() -> Vec<PathBuf> {
     }
 
     dirs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_library_symbol_is_an_error_and_does_not_mutate_schematic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.kicad_sch");
+        std::fs::write(
+            &path,
+            "(kicad_sch (version 20250610) (generator \"test\") (lib_symbols))",
+        )
+        .unwrap();
+        let mut schematic = Schematic::load(&path).unwrap();
+        let before = format!("{:?}", schematic.raw_other);
+
+        let error = ensure_lib_symbol(
+            &mut schematic,
+            "KonnectDefinitelyMissing:NoSuchSymbolForRegressionTest",
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::LibrarySymbolNotFound(_)));
+        assert_eq!(before, format!("{:?}", schematic.raw_other));
+    }
 }

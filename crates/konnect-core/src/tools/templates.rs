@@ -1,15 +1,16 @@
-//! `templates` toolset — Reference circuit library for validated subcircuit templates.
+//! `templates` toolset — Curated reference circuit starting points.
 //!
 //! Templates are JSON files stored in the platform user-data directory and
 //! shipped as embedded defaults. On Linux, the directory is
 //! `$XDG_DATA_HOME/konnect/templates` (normally `~/.local/share/konnect/templates`).
-//! Claude retrieves a template and adapts it to the user's project — this
-//! prevents hallucinating component values.
+//! Claude retrieves a template and adapts it to the user's project. Values and
+//! connections remain design inputs that must be checked against the selected parts.
 
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, require_str, ToolContext, ToolDef};
-use konnect_sexp::writer::{new_uuid, write_atomic};
+use konnect_schematic_editor as cse;
+use konnect_sexp::geometry::snap_point;
 use serde_json::json;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -25,7 +26,7 @@ fn builtin_templates() -> Vec<serde_json::Value> {
             "category": "connectivity/usb",
             "tags": ["usb-c", "power", "5v", "sink"],
             "components": [
-                {"ref_prefix": "J", "lib_id": "Connector:USB_C_Receptacle_USB2.0", "value": "USB_C", "notes": "USB-C receptacle, 16-pin or 6-pin mid-mount"},
+                {"ref_prefix": "J", "lib_id": "Connector:USB_C_Receptacle_USB2.0_16P", "value": "USB_C", "notes": "Generic 16-pin USB 2.0 receptacle symbol; assign and verify the exact connector footprint/pinout"},
                 {"ref_prefix": "R", "lib_id": "Device:R", "value": "5.1k", "quantity": 2, "package": "0402", "notes": "CC1 and CC2 pull-down — required for 5V default current"},
                 {"ref_prefix": "D", "lib_id": "Device:D_TVS", "value": "PRTR5V0U2X", "quantity": 1, "notes": "ESD protection on D+/D-"},
                 {"ref_prefix": "C", "lib_id": "Device:C", "value": "100nF", "quantity": 1, "package": "0402", "notes": "VBUS decoupling"}
@@ -38,7 +39,7 @@ fn builtin_templates() -> Vec<serde_json::Value> {
                 {"from": "J.D-", "to_net": "USB_DN", "notes": "USB data negative"},
                 {"from": "J.GND", "to_net": "GND", "notes": "Ground"}
             ],
-            "design_notes": "CC resistor value is critical: 5.1k ±1% for default 5V/900mA. For USB 2.0 only, connect D+/D- directly to MCU. For USB 3.x, route TX/RX as controlled impedance pairs.",
+            "design_notes": "Verify Rd and tolerance against the current USB Type-C specification and the exact receptacle. Rd identifies a sink; the source's Rp advertisement determines available current. Follow the chosen USB PHY reference design for data-line protection, series elements, and layout.",
             "references": ["USB Type-C Spec Rev 2.0, Table 4-25"]
         }),
         json!({
@@ -58,7 +59,7 @@ fn builtin_templates() -> Vec<serde_json::Value> {
                 {"from": "U.VOUT", "to_net": "VCC_3V3", "notes": "3.3V regulated output"},
                 {"from": "U.GND", "to_net": "GND", "notes": "Ground — ensure low-impedance path"}
             ],
-            "design_notes": "Place input and output caps within 5mm of regulator pins. AMS1117 needs >10uF output for stability. For low-noise applications, consider ADP151 or TPS7A20.",
+            "design_notes": "Follow the exact regulator datasheet for input/output capacitance, ESR, voltage derating, stability, thermal limits, and placement. Do not substitute another LDO without recalculating the surrounding design.",
             "references": ["AMS1117 datasheet, Section 8.2"]
         }),
         json!({
@@ -76,7 +77,7 @@ fn builtin_templates() -> Vec<serde_json::Value> {
                 {"ref_prefix": "C", "lib_id": "Device:C", "value": "1uF", "quantity": 1, "package": "0402", "notes": "VCAP pin — required for internal regulator"},
                 {"ref_prefix": "R", "lib_id": "Device:R", "value": "10k", "quantity": 1, "package": "0402", "notes": "NRST pull-up"},
                 {"ref_prefix": "C", "lib_id": "Device:C", "value": "100nF", "quantity": 1, "package": "0402", "notes": "NRST filter cap to GND"},
-                {"ref_prefix": "J", "lib_id": "Connector:Conn_ARM_SWD_10", "value": "SWD", "notes": "10-pin ARM SWD debug header"}
+                {"ref_prefix": "J", "lib_id": "Connector:Conn_ARM_JTAG_SWD_10", "value": "SWD", "notes": "10-pin ARM JTAG/SWD debug header"}
             ],
             "connections": [
                 {"from": "U.VDD", "to_net": "VCC_3V3", "notes": "All VDD pins to 3.3V"},
@@ -98,7 +99,7 @@ fn builtin_templates() -> Vec<serde_json::Value> {
             "category": "connectivity/i2c",
             "tags": ["i2c", "pull-up", "bus"],
             "components": [
-                {"ref_prefix": "R", "lib_id": "Device:R", "value": "4.7k", "quantity": 2, "package": "0402", "notes": "SDA and SCL pull-ups. Use 2.2k for fast-mode (400kHz), 1k for fast-mode plus (1MHz)"}
+                {"ref_prefix": "R", "lib_id": "Device:R", "value": "4.7k", "quantity": 2, "package": "0402", "notes": "Placeholder SDA/SCL pull-ups; calculate from bus voltage, capacitance, speed, rise-time limit, and sink-current limit"}
             ],
             "connections": [
                 {"from": "R1.1", "to_net": "SDA", "notes": "I2C data line"},
@@ -106,7 +107,7 @@ fn builtin_templates() -> Vec<serde_json::Value> {
                 {"from": "R2.1", "to_net": "SCL", "notes": "I2C clock line"},
                 {"from": "R2.2", "to_net": "VCC_3V3", "notes": "Pull to I2C bus voltage"}
             ],
-            "design_notes": "One set of pull-ups per I2C bus — do NOT add pull-ups on every device. Value depends on bus speed and capacitance. 4.7k is safe for standard mode (100kHz) with <400pF bus capacitance.",
+            "design_notes": "Account for every pull-up already present on the bus. Calculate the allowable resistance range from the current I2C specification, bus voltage/capacitance/speed, and every device's sink capability; 4.7k is only a placeholder.",
             "references": ["NXP UM10204: I2C-bus specification"]
         }),
         json!({
@@ -224,7 +225,7 @@ pub fn tools() -> Vec<ToolDef> {
             "search_templates",
             "Search the reference circuit template library. Returns matching templates for \
              common subcircuits (USB-C, LDO, buck converter, MCU minimal system, I2C pull-ups, etc.). \
-             Use these instead of designing from scratch — templates have verified component values.",
+             Templates are curated starting points; verify values and connections for the selected parts.",
             json!({
                 "type": "object",
                 "properties": {
@@ -256,9 +257,9 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "apply_template",
-            "Instantiate a reference circuit template into the current schematic. Places all \
-             components and wires them according to the template's connection map. Use net_mappings \
-             to connect template nets to your project's existing nets.",
+            "Place a reference template's components into the current schematic and return its \
+             mapped connection plan. Wiring is intentionally left for explicit follow-up calls after \
+             pin verification.",
             json!({
                 "type": "object",
                 "properties": {
@@ -428,7 +429,7 @@ async fn handle_apply_template(
         }
     };
 
-    let mut content = std::fs::read_to_string(&sch_path)?;
+    let content = std::fs::read_to_string(&sch_path)?;
 
     // Determine starting reference numbers by scanning existing components
     let ref_start = args["ref_start"]
@@ -440,6 +441,37 @@ async fn handle_apply_template(
     let mut placed = Vec::new();
     let mut ref_counters: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    let mut template_ref_counters: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut reference_map = serde_json::Map::new();
+    let mut sch = cse::Schematic::load(&sch_path)?;
+
+    let effects_node = |hide: bool| -> cse::sexp::SexpNode {
+        let font = cse::sexp::SexpNode::List(vec![
+            cse::sexp::atom("font"),
+            cse::sexp::SexpNode::List(vec![
+                cse::sexp::atom("size"),
+                cse::sexp::atom("1.27"),
+                cse::sexp::atom("1.27"),
+            ]),
+        ]);
+        let mut children = vec![cse::sexp::atom("effects"), font];
+        if hide {
+            children.push(cse::sexp::SexpNode::List(vec![
+                cse::sexp::atom("hide"),
+                cse::sexp::atom("yes"),
+            ]));
+        }
+        cse::sexp::SexpNode::List(children)
+    };
+    let at_node = |x: f64, y: f64| -> cse::sexp::SexpNode {
+        cse::sexp::SexpNode::List(vec![
+            cse::sexp::atom("at"),
+            cse::sexp::atom(cse::types::fmt_f64(x)),
+            cse::sexp::atom(cse::types::fmt_f64(y)),
+            cse::sexp::atom("0"),
+        ])
+    };
 
     // Place components in a column layout
     let spacing_y = 15.0; // mm between components
@@ -451,50 +483,63 @@ async fn handle_apply_template(
         let notes = comp["notes"].as_str().unwrap_or("");
 
         for _q in 0..quantity {
+            let template_counter = template_ref_counters
+                .entry(ref_prefix.to_string())
+                .or_insert(1);
+            let is_first_for_prefix = *template_counter == 1;
+            let template_reference = format!("{}{}", ref_prefix, template_counter);
+            *template_counter += 1;
             let counter = ref_counters
                 .entry(ref_prefix.to_string())
                 .or_insert(ref_start);
             let reference = format!("{}{}", ref_prefix, counter);
             *counter += 1;
 
-            let x = base_x;
-            let y = base_y + (placed.len() as f64) * spacing_y;
-            let uuid = new_uuid();
+            let (x, y) = snap_point(base_x, base_y + (placed.len() as f64) * spacing_y, 1.27);
+            cse::library::ensure_lib_symbol(&mut sch, lib_id)?;
 
-            // Generate symbol S-expression
-            let symbol_sexp = format!(
-                r#"
-  (symbol
-    (lib_id "{lib_id}")
-    (at {x} {y} 0)
-    (unit 1)
-    (exclude_from_sim no)
-    (in_bom yes)
-    (on_board yes)
-    (uuid "{uuid}")
-    (property "Reference" "{reference}" (at {rx} {ry} 0) (effects (font (size 1.27 1.27))))
-    (property "Value" "{value}" (at {vx} {vy} 0) (effects (font (size 1.27 1.27))))
-    (instances
-      (project ""
-        (path "/" (reference "{reference}") (unit 1))
-      )
-    )
-  )"#,
-                lib_id = lib_id,
-                x = x,
-                y = y,
-                uuid = uuid,
-                reference = reference,
-                value = value,
-                rx = x + 2.0,
-                ry = y,
-                vx = x,
-                vy = y + 2.54,
-            );
-
-            // Insert before closing paren
-            let close = content.rfind(')').unwrap_or(content.len());
-            content = format!("{}{}\n)", &content[..close], symbol_sexp);
+            let mut symbol = cse::Symbol::new(lib_id, x, y);
+            symbol.at.rotation = Some(0.0);
+            let mut ref_property = cse::Property::new("Reference", &reference);
+            ref_property.sub_nodes.push(at_node(x, y - 3.81));
+            ref_property.sub_nodes.push(effects_node(false));
+            symbol.properties.push(ref_property);
+            let mut value_property = cse::Property::new("Value", value);
+            value_property.sub_nodes.push(at_node(x, y + 3.81));
+            value_property.sub_nodes.push(effects_node(false));
+            symbol.properties.push(value_property);
+            for name in ["Footprint", "Datasheet"] {
+                let mut property = cse::Property::new(name, "");
+                property.sub_nodes.push(at_node(x, y));
+                property.sub_nodes.push(effects_node(true));
+                symbol.properties.push(property);
+            }
+            symbol.raw_sub_nodes.push(cse::sexp::SexpNode::List(vec![
+                cse::sexp::atom("instances"),
+                cse::sexp::SexpNode::List(vec![
+                    cse::sexp::atom("project"),
+                    cse::sexp::qstr(""),
+                    cse::sexp::SexpNode::List(vec![
+                        cse::sexp::atom("path"),
+                        cse::sexp::qstr("/"),
+                        cse::sexp::SexpNode::List(vec![
+                            cse::sexp::atom("reference"),
+                            cse::sexp::qstr(&reference),
+                        ]),
+                        cse::sexp::SexpNode::List(vec![
+                            cse::sexp::atom("unit"),
+                            cse::sexp::atom("1"),
+                        ]),
+                    ]),
+                ]),
+            ]));
+            sch.add_symbol(symbol);
+            reference_map.insert(template_reference, json!(&reference));
+            // Built-in connection plans use both numbered references (`R1.1`)
+            // and a short alias for a single IC/connector (`U.VIN`, `J.VBUS`).
+            if is_first_for_prefix {
+                reference_map.insert(ref_prefix.to_string(), json!(&reference));
+            }
 
             placed.push(json!({
                 "reference": reference,
@@ -508,8 +553,9 @@ async fn handle_apply_template(
         }
     }
 
-    // Write the updated schematic
-    write_atomic(&sch_path, &content)?;
+    // Persist the complete template insertion in one atomic write. Library
+    // definitions are embedded before any component instance is committed.
+    sch.overwrite()?;
 
     info!(
         template_id = %template_id,
@@ -523,6 +569,13 @@ async fn handle_apply_template(
         .iter()
         .map(|conn| {
             let mut c = conn.clone();
+            for field in ["from", "to", "via"] {
+                if let Some(endpoint) = c[field].as_str() {
+                    if let Some(mapped) = map_template_endpoint(endpoint, &reference_map) {
+                        c[field] = json!(mapped);
+                    }
+                }
+            }
             let original_net = c["to_net"].as_str().map(String::from);
             if let Some(net) = original_net {
                 if let Some(mapped) = net_mappings.get(&net) {
@@ -538,12 +591,31 @@ async fn handle_apply_template(
         serde_json::to_string_pretty(&json!({
             "template": template_id,
             "components_placed": placed,
+            "reference_map": reference_map,
             "connections_to_wire": mapped_connections,
             "design_notes": tmpl["design_notes"],
-            "next_steps": "Use connect_to_net or connect_pins to wire the placed components according to the connections list above."
+            "next_steps": "Connection endpoints already use the assigned references. Verify actual pin numbers/coordinates, then wire explicitly with connect_to_net or connect_pins."
         }))
         .unwrap(),
     ))
+}
+
+/// Replace a template reference at the start of an endpoint while preserving
+/// its pin suffix. Free-form notes such as "voltage divider R_top/R_bot" are
+/// deliberately left untouched.
+fn map_template_endpoint(
+    endpoint: &str,
+    reference_map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let (reference, suffix) = endpoint
+        .split_once('.')
+        .map(|(reference, suffix)| (reference, Some(suffix)))
+        .unwrap_or((endpoint, None));
+    let mapped = reference_map.get(reference)?.as_str()?;
+    Some(match suffix {
+        Some(suffix) => format!("{mapped}.{suffix}"),
+        None => mapped.to_string(),
+    })
 }
 
 async fn handle_list_categories(
@@ -601,4 +673,31 @@ fn find_next_ref_number(content: &str) -> usize {
         pos = abs + 1;
     }
     max_ref + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_endpoint_mapping_handles_numbered_and_short_aliases() {
+        let reference_map = serde_json::Map::from_iter([
+            ("U".to_string(), json!("U12")),
+            ("R1".to_string(), json!("R12")),
+        ]);
+
+        assert_eq!(
+            map_template_endpoint("U.VIN", &reference_map).as_deref(),
+            Some("U12.VIN")
+        );
+        assert_eq!(
+            map_template_endpoint("R1.1", &reference_map).as_deref(),
+            Some("R12.1")
+        );
+        assert_eq!(
+            map_template_endpoint("R1", &reference_map).as_deref(),
+            Some("R12")
+        );
+        assert_eq!(map_template_endpoint("GPIO", &reference_map), None);
+    }
 }

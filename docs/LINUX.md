@@ -5,7 +5,8 @@ Konnect supports KiCAD 10 on Linux for the full MCP server, schematic editing,
 and the schematic viewer. Pull-request and weekly CI exercise the real CLI design
 loop, KiCAD's demo corpus, a protocol-level Unix-socket suite, and real PCB Editor
 GUI IPC under Xvfb, including footprint move/rotate geometry-preservation
-regressions.
+regressions. The E2E workflow also imports the packaged Python action with KiCad's
+real `pcbnew` and `wx` modules and verifies Linux instance registration.
 
 ## What CI proves
 
@@ -13,9 +14,11 @@ The distro matrix deliberately separates portability checks from real-KiCAD test
 
 | Environment | Automated coverage |
 |---|---|
-| Ubuntu 24.04 LTS + KiCAD 10 | Workspace tests, release builds, PCM install smoke, viewer GUI smoke, real CLI design loop and demo corpus, Unix-socket IPC, and live PCB Editor placement/move/rotate |
+| Ubuntu 26.04 LTS | Workspace tests, release builds, PCM install smoke, and viewer tests/build |
+| Ubuntu 24.04 LTS + KiCAD 10 | Workspace tests, release builds, PCM install smoke, real Python action-plugin import/registration, viewer GUI smoke, real CLI design loop and demo corpus, Unix-socket IPC, and live PCB Editor placement/move/rotate |
 | Ubuntu 22.04 LTS | Workspace tests, release builds, PCM install smoke, viewer tests/build, and system `protoc` 3.12 compatibility |
 | Debian 12 | Workspace tests, release builds, PCM install smoke, and viewer tests/build; also the Linux release glibc baseline |
+| Debian 13 | Workspace tests, release builds, PCM install smoke, and viewer tests/build |
 | Fedora 44 | Workspace tests, release builds, PCM install smoke, and viewer tests/build |
 | Arch Linux (rolling container) | Workspace tests, release builds, PCM install smoke, and viewer tests/build |
 
@@ -34,7 +37,7 @@ before choosing a host distro.
 Use a native KiCAD package where possible. Native packages expose `kicad-cli`, the
 standard symbol libraries, and KiCAD's IPC Unix socket directly to Konnect.
 
-### Ubuntu 24.04 and 22.04
+### Ubuntu 26.04, 24.04, and 22.04
 
 KiCAD recommends its stable PPA because Ubuntu's base repository is older:
 
@@ -104,10 +107,11 @@ sudo dnf install gcc gcc-c++ make cmake pkgconf-pkg-config protobuf-compiler \
 
 ### Debian
 
-Konnect builds and runs on Debian 12's glibc baseline, but Debian stable may ship an
-older KiCAD major version. Install KiCAD 10 from a KiCAD-provided distribution method
-before using the PCB IPC features. The Debian 12 CI row validates Konnect itself; the
-real KiCAD 10 CLI and GUI E2E job runs on Ubuntu 24.04.
+Konnect builds on current Debian 13 and retains Debian 12 as the glibc release
+baseline. A Debian repository may ship a different KiCAD major version than Konnect
+requires; install KiCAD 10 from a KiCAD-provided distribution method before using the
+PCB IPC features. The Debian rows validate Konnect itself; the real KiCAD 10 CLI and
+GUI E2E job runs on Ubuntu 24.04.
 
 ### Build a local PCM archive
 

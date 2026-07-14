@@ -7,14 +7,15 @@
 
 # Konnect *BETA Release
 
-**AI-assisted PCB design for KiCAD 10.** Konnect is a native KiCAD plugin — a single
-Rust binary — that lets Claude and other AI assistants design schematics and PCBs
-through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP).
+**AI-assisted PCB design for KiCad 10.** Konnect is a native Rust MCP server,
+packaged as a KiCad plugin, that lets Claude and other AI assistants design
+schematics and PCBs through the
+[Model Context Protocol](https://modelcontextprotocol.io) (MCP).
 
 **185 tools across 18 on-demand toolsets.** Schematic capture, PCB layout and
 routing, ERC/DRC, design-review audits, JLCPCB part search, Freerouting, reference
 circuits, and a full manufacturing export pipeline — with bundled skills and agents
-that teach Claude KiCAD conventions out of the box.
+that teach Claude KiCad conventions out of the box.
 
 > **Status: beta.** The core toolchain is tested and working, but this is a young
 > release and it wants real-world mileage and review. Issues and PRs are welcome —
@@ -38,8 +39,10 @@ Konnect, a tool call is a function call. One process, one language, no plumbing.
 **The dependency surface was enormous.** Running the original means carrying Node.js
 and its npm tree, Python and its pip packages, wxPython, kicad-skip, and KiCAD's
 SWIG bindings — two package ecosystems plus a binding layer, every one of them a
-moving target that can break an install. Konnect is a single native binary, about
-5 MB. There is nothing to install alongside it and nothing to version-match.
+moving target that can break an install. The Konnect MCP server ships as one native
+binary and needs no Node/npm or separate Python/pip runtime. KiCAD, its standard
+libraries, and the optional viewer's host GUI libraries are still required for the
+features that use them.
 
 **SWIG is a dead end.** The original's PCB backend depends on KiCAD's SWIG Python
 bindings, which KiCAD is deprecating in favor of its IPC API. SWIG also carried
@@ -60,8 +63,8 @@ tokens) and lets the model pull in toolsets on demand — plus built-in observab
 (`get_recent_calls`, `server_stats`, JSONL call logs) so the model can diagnose its
 own tool failures.
 
-The result is smaller, faster to install, aligned with where KiCAD is going, and
-built for production use rather than experimentation. The original project remains
+The result is smaller, faster to install, and aligned with where KiCAD is going.
+The original project remains
 open, maintained, and useful — see [the comparison below](#relationship-to-kicad-mcp-server).
 
 ## What it does
@@ -69,17 +72,17 @@ open, maintained, and useful — see [the comparison below](#relationship-to-kic
 Instead of describing changes and applying them by hand, the AI works your project
 directly:
 
-- **Place and wire schematic components** — add resistors, ICs, connectors; wire them
-  together by pin name
+- **Place and wire schematic components** — add resistors, ICs, connectors; inspect
+  their pins and wire them by pin number or exact endpoint
 - **Lay out the PCB** — place, move, rotate, and route footprints in real time via
   KiCAD's IPC API, with full undo/redo integration
 - **Run design checks** — ERC, DRC, connectivity validation, decoupling audits,
   power-rail review, BOM health checks
 - **Export production files** — Gerbers, drill, BOM, pick-and-place, 3D models, PDF
-- **Search JLCPCB parts** — find in-stock components in a local 2.5M-part catalog and
+- **Search JLCPCB parts** — query components in a downloaded local catalog and
   suggest alternatives
-- **Start from reference circuits** — USB-C, LDO, buck converter, STM32, I2C, LED
-  templates with verified component values
+- **Start from reference circuits** — curated USB-C, LDO, buck converter, STM32,
+  I2C, and LED templates; verify values against the selected parts and requirements
 - **Watch it happen** — a live schematic viewer auto-refreshes as the AI edits
 
 The full tool catalog is documented in [tool-directory.md](tool-directory.md).
@@ -196,13 +199,11 @@ documented in [docs/LINUX.md](docs/LINUX.md).
 
 Konnect is licensed under the **[GNU AGPL-3.0](LICENSE)**.
 
-If you're a hobbyist, student, freelancer, or open-source project: **use it freely,
-no strings attached.** Design boards, ship them, sell them.
-
-If you're a business: the AGPL requires that anything you build on or around Konnect —
-including software provided over a network — be open-sourced under the same license.
-If that doesn't work for you, **commercial licenses are available**: see
-[COMMERCIAL.md](COMMERCIAL.md).
+Individuals and organizations may use Konnect under the AGPL at no license fee,
+including for commercial PCB design. Distribution, modification, combination, and
+remote-network use can create source-availability obligations. If those terms do not
+fit your intended use, **commercial licenses are available**. See
+[COMMERCIAL.md](COMMERCIAL.md) for a careful summary; it is not legal advice.
 
 ## Relationship to KiCAD-MCP-Server
 

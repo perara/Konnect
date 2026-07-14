@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/api/schemas/v1",
   "identifier": "com.github.mixelpixx.konnect",
   "name": "Konnect",
-  "description": "AI-assisted PCB design via the Model Context Protocol. 185 tools for schematic editing, PCB layout, routing, design review, and manufacturing export.",
+  "description": "AI-assisted PCB design via the Model Context Protocol. 185 on-demand design tools plus 6 routing and observability tools.",
   "runtime": {
     "type": "exec"
   },
@@ -10,7 +10,7 @@
     {
       "identifier": "start-server",
       "name": "Konnect",
-      "description": "Register this KiCAD instance for the Konnect MCP server",
+      "description": "Register this KiCad instance for the Konnect MCP server",
       "entrypoint": "bin/konnect.exe register-kicad",
       "show-button": true,
       "scopes": ["pcb"]

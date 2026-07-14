@@ -172,7 +172,7 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "annotate_schematic",
-            "Run kicad-cli to auto-assign reference designators (R? → R1, U? → U1, etc.).",
+            "Atomically assign sequential reference designators to unannotated symbols (R? → R1, U? → U1, etc.).",
             json!({
                 "type": "object",
                 "properties": {
@@ -325,7 +325,7 @@ async fn handle_add_schematic_component(
     let mut sch = cse::Schematic::load(&sch_path)?;
 
     // Embed the library symbol definition
-    cse::library::ensure_lib_symbol(&mut sch, &lib_id);
+    cse::library::ensure_lib_symbol(&mut sch, &lib_id)?;
 
     // Build the Symbol struct
     let mut sym = cse::Symbol::new(&lib_id, x, y);

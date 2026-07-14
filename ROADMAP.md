@@ -13,13 +13,18 @@ Opening an issue is the best way to influence priority.
 
 ## Tools
 
-- **Symbol & footprint creation** — author new library parts from scratch, not
-  just search and place existing ones.
+- **Richer symbol & footprint authoring** — the current library toolset creates,
+  edits, deletes, lists, and registers symbols and footprints. Future work can
+  add graphical primitives, richer pin/body editing, and library-table UX.
 - **Eagle project import** — migrate legacy Eagle designs.
 
 ## Infrastructure
 
-- **Deeper end-to-end tests** — tool-handler tests against a mocked IPC endpoint.
+- **Broader desktop integration coverage** — the current suite covers real KiCad
+  CLI operations, Unix-socket protocol behavior, live PCB Editor IPC, PCM schema
+  and install smokes, and the Python action-plugin import. Additional compositor,
+  sandbox, GPU, and manually driven Plugin and Content Manager UI coverage remains
+  useful.
 
 ## Done
 

@@ -101,15 +101,15 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "export_3d",
-            "Export the PCB as a 3D model (STEP or VRML) using kicad-cli.",
+            "Export the PCB as a supported KiCAD 10 3D model using kicad-cli.",
             json!({
                 "type": "object",
                 "properties": {
                     "board": { "type": "string", "description": "Path to .kicad_pcb file" },
-                    "output": { "type": "string", "description": "Output file path (.step or .wrl)" },
+                    "output": { "type": "string", "description": "Output file path with an extension matching the selected format" },
                     "format": {
                         "type": "string",
-                        "description": "Export format: 'step' (default) or 'vrml'",
+                        "description": "Export format: step (default), vrml, glb, brep, stl, ply, stpz, u3d, xao, or 3dpdf",
                         "default": "step"
                     },
                     "include_unspecified": {
@@ -259,16 +259,12 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "refill_zones",
-            "Refill all copper pour zones on the board. Requires a running KiCAD instance with IPC enabled; returns an error with instructions if KiCAD is not open.",
+            "Refill all copper zones on the currently open PCB through KiCAD IPC. The board \
+             argument identifies the intended design for the caller; open that board before calling.",
             json!({
                 "type": "object",
                 "properties": {
-                    "board": { "type": "string", "description": "Path to .kicad_pcb file" },
-                    "zones": {
-                        "type": "array",
-                        "description": "Net names of specific zones to refill (empty = all zones, currently not filtered)",
-                        "items": { "type": "string" }
-                    }
+                    "board": { "type": "string", "description": "Path to the .kicad_pcb file that should be open in PCB Editor" }
                 },
                 "required": ["board"]
             }),
@@ -290,7 +286,8 @@ pub fn tools() -> Vec<ToolDef> {
                         "type": "string",
                         "description": "Minimum severity to include: 'error', 'warning' (default), 'info'",
                         "default": "warning"
-                    }
+                    },
+                    "refill_zones": { "type": "boolean", "description": "Ask KiCAD DRC to refill zones before checking", "default": false }
                 },
                 "required": ["board"]
             }),
@@ -308,17 +305,24 @@ async fn handle_export_gerber(
     let board = get_path(args, "board")?;
     let output_dir = get_path(args, "output_dir")?;
     let drill = args["drill_file"].as_bool().unwrap_or(true);
+    let layers: Vec<String> = args["layers"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let layer_refs: Vec<&str> = layers.iter().map(String::as_str).collect();
 
     // Ensure output dir exists
     tokio::fs::create_dir_all(&output_dir).await?;
 
     let cli = &ctx.config.kicad_cli;
-    cli::export_gerber(cli, &board, &output_dir).await?;
+    cli::export_gerber(cli, &board, &output_dir, &layer_refs).await?;
 
     if drill {
-        // kicad-cli also has a dedicated drill export
-        let drill_path = output_dir.join("drill.drl");
-        let _ = cli::export_drill(cli, &board, &drill_path).await; // best-effort
+        cli::export_drill(cli, &board, &output_dir).await?;
     }
 
     // List produced files
@@ -357,9 +361,10 @@ async fn handle_export_pdf(
         })
         .unwrap_or_default();
     let layer_refs: Vec<&str> = layers.iter().map(|s| s.as_str()).collect();
+    let black_and_white = args["black_and_white"].as_bool().unwrap_or(false);
 
     let cli = &ctx.config.kicad_cli;
-    cli::export_pdf(cli, &board, &output, &layer_refs).await?;
+    cli::export_pdf(cli, &board, &output, &layer_refs, black_and_white).await?;
 
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&json!({
@@ -386,9 +391,10 @@ async fn handle_export_svg(
         })
         .unwrap_or_default();
     let layer_refs: Vec<&str> = layers.iter().map(|s| s.as_str()).collect();
+    let black_and_white = args["black_and_white"].as_bool().unwrap_or(false);
 
     let cli = &ctx.config.kicad_cli;
-    cli::export_svg_pcb(cli, &board, &output, &layer_refs).await?;
+    cli::export_svg_pcb(cli, &board, &output, &layer_refs, black_and_white).await?;
 
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&json!({
@@ -406,9 +412,10 @@ async fn handle_export_3d(
     let board = get_path(args, "board")?;
     let output = get_path(args, "output")?;
     let format = args["format"].as_str().unwrap_or("step");
+    let include_unspecified = args["include_unspecified"].as_bool().unwrap_or(false);
 
     let cli = &ctx.config.kicad_cli;
-    cli::export_3d(cli, &board, &output, format).await?;
+    cli::export_3d(cli, &board, &output, format, include_unspecified).await?;
 
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&json!({
@@ -427,9 +434,10 @@ async fn handle_export_bom(
     let schematic = get_path(args, "schematic")?;
     let output = get_path(args, "output")?;
     let format = args["format"].as_str().unwrap_or("csv");
+    let exclude_dnp = args["exclude_dnp"].as_bool().unwrap_or(true);
 
     let cli = &ctx.config.kicad_cli;
-    cli::export_bom(cli, &schematic, &output, format).await?;
+    cli::export_bom(cli, &schematic, &output, format, exclude_dnp).await?;
 
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&json!({
@@ -449,9 +457,23 @@ async fn handle_export_netlist(
     let format = args["format"].as_str().unwrap_or("kicad");
 
     let cli = &ctx.config.kicad_cli;
-    // kicad-cli `sch export netlist` works on both .kicad_sch and .kicad_pcb paths.
-    // For PCB-specific netlist formats (IPC-D-356), delegate same way.
-    cli::export_netlist(cli, &board, &output, format).await?;
+    let extension = board.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    match format.to_ascii_lowercase().as_str() {
+        "ipc" | "ipcd356" | "ipc-d-356" => {
+            if extension != "kicad_pcb" {
+                anyhow::bail!("IPC-D-356 export requires a .kicad_pcb board file");
+            }
+            cli::export_ipcd356(cli, &board, &output).await?;
+        }
+        _ => {
+            if extension != "kicad_sch" {
+                anyhow::bail!(
+                    "Schematic netlist export requires a .kicad_sch file; use format 'ipc' for a .kicad_pcb board"
+                );
+            }
+            cli::export_netlist(cli, &board, &output, format).await?;
+        }
+    }
 
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&json!({
@@ -474,7 +496,7 @@ async fn handle_export_position_file(
     let units = args["units"].as_str().unwrap_or("mm");
 
     let cli = &ctx.config.kicad_cli;
-    cli::export_position_file(cli, &board, &output, format).await?;
+    cli::export_position_file(cli, &board, &output, format, side, units).await?;
 
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&json!({
@@ -619,19 +641,16 @@ async fn handle_refill_zones(
             }))
             .unwrap(),
         )),
-        _ => {
-            // Fallback: run kicad-cli with zone-fill option if supported
-            // kicad-cli pcb export gerber fills zones as a side effect
-            // For now report the limitation
-            Ok(CallToolResult::text(
-                serde_json::to_string_pretty(&json!({
-                    "success": false,
-                    "note": "Zone refill requires a running KiCAD instance with IPC enabled, or manual zone fill in KiCAD GUI",
-                    "board": board.to_str().unwrap_or("")
-                }))
-                .unwrap(),
-            ))
-        }
+        Ok(Err(error)) => Ok(CallToolResult::error(format!(
+            "Zone refill failed for {}: {}. Open the intended board in KiCAD PCB Editor with IPC enabled.",
+            board.display(),
+            error
+        ))),
+        Err(error) => Ok(CallToolResult::error(format!(
+            "Zone refill task failed for {}: {}",
+            board.display(),
+            error
+        ))),
     }
 }
 

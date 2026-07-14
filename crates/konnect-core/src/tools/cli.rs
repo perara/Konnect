@@ -1,6 +1,7 @@
 //! kicad-cli subprocess wrapper for KiCAD 10.
 //!
-//! All exports, ERC, DRC, and annotation operations shell out to kicad-cli.
+//! Exports, ERC, and DRC operations shell out to kicad-cli. Annotation is
+//! implemented locally because KiCAD 10 removed the `sch annotate` command.
 //! This module provides a typed interface to those commands.
 //!
 //! VERIFIED against: kicad-cli from KiCAD 10.0 (C:\Program Files\KiCad\10.0\bin\kicad-cli.exe)
@@ -234,7 +235,7 @@ pub async fn annotate_schematic(_cli: &str, schematic: &Path) -> Result<()> {
     }
 
     if new_content != content {
-        tokio::fs::write(schematic, &new_content).await?;
+        konnect_sexp::writer::write_atomic(schematic, &new_content)?;
     }
 
     Ok(())
@@ -278,15 +279,18 @@ pub async fn export_schematic_pdf(cli: &str, schematic: &Path, output: &Path) ->
 /// KiCAD 10: `sch export bom --output <path> <input>`
 /// Note: v10 BOM does NOT use --format. It uses --fields, --labels, --field-delimiter.
 /// Default output is CSV-like with Reference,Value,Footprint,Qty,DNP fields.
-pub async fn export_bom(cli: &str, schematic: &Path, output: &Path, _format: &str) -> Result<()> {
-    let args = [
-        "sch",
-        "export",
-        "bom",
-        "--output",
-        output.to_str().unwrap(),
-        schematic.to_str().unwrap(),
-    ];
+pub async fn export_bom(
+    cli: &str,
+    schematic: &Path,
+    output: &Path,
+    _format: &str,
+    exclude_dnp: bool,
+) -> Result<()> {
+    let mut args = vec!["sch", "export", "bom", "--output", output.to_str().unwrap()];
+    if exclude_dnp {
+        args.push("--exclude-dnp");
+    }
+    args.push(schematic.to_str().unwrap());
     run_cli(cli, &args, LONG_TIMEOUT).await?;
     Ok(())
 }
@@ -327,12 +331,36 @@ pub async fn export_netlist(
 
 // ─── PCB Export ──────────────────────────────────────────────────────────────
 
-/// KiCAD 10: `pcb export gerbers --output <dir> <input>` (PLURAL!)
-pub async fn export_gerber(cli: &str, pcb: &Path, output_dir: &Path) -> Result<()> {
-    let args = [
+/// KiCAD 10: `pcb export gerbers --output <dir> [--layers <csv>] <input>` (PLURAL!)
+pub async fn export_gerber(
+    cli: &str,
+    pcb: &Path,
+    output_dir: &Path,
+    layers: &[&str],
+) -> Result<()> {
+    let layers_csv = layers.join(",");
+    let mut args = vec![
         "pcb",
         "export",
         "gerbers",
+        "--output",
+        output_dir.to_str().unwrap(),
+    ];
+    if !layers_csv.is_empty() {
+        args.push("--layers");
+        args.push(&layers_csv);
+    }
+    args.push(pcb.to_str().unwrap());
+    run_cli(cli, &args, LONG_TIMEOUT).await?;
+    Ok(())
+}
+
+/// KiCAD 10: `pcb export drill --output <dir> <input>`
+pub async fn export_drill(cli: &str, pcb: &Path, output_dir: &Path) -> Result<()> {
+    let args = [
+        "pcb",
+        "export",
+        "drill",
         "--output",
         output_dir.to_str().unwrap(),
         pcb.to_str().unwrap(),
@@ -341,39 +369,47 @@ pub async fn export_gerber(cli: &str, pcb: &Path, output_dir: &Path) -> Result<(
     Ok(())
 }
 
-/// KiCAD 10: `pcb export drill --output <dir> <input>`
-pub async fn export_drill(cli: &str, pcb: &Path, output: &Path) -> Result<()> {
-    let args = [
-        "pcb",
-        "export",
-        "drill",
-        "--output",
-        output.to_str().unwrap(),
-        pcb.to_str().unwrap(),
-    ];
-    run_cli(cli, &args, LONG_TIMEOUT).await?;
-    Ok(())
-}
-
-/// KiCAD 10: `pcb export pdf --output <path> [--layers <layer>]... <input>`
-pub async fn export_pdf(cli: &str, pcb: &Path, output: &Path, layers: &[&str]) -> Result<()> {
+/// KiCAD 10: `pcb export pdf --output <path> [--layers <csv>] <input>`
+pub async fn export_pdf(
+    cli: &str,
+    pcb: &Path,
+    output: &Path,
+    layers: &[&str],
+    black_and_white: bool,
+) -> Result<()> {
     let mut args = vec!["pcb", "export", "pdf", "--output", output.to_str().unwrap()];
-    for layer in layers {
+    let layers_csv = layers.join(",");
+    if !layers_csv.is_empty() {
         args.push("--layers");
-        args.push(layer);
+        args.push(&layers_csv);
     }
+    if black_and_white {
+        args.push("--black-and-white");
+    }
+    args.push("--mode-single");
     args.push(pcb.to_str().unwrap());
     run_cli(cli, &args, LONG_TIMEOUT).await?;
     Ok(())
 }
 
-/// KiCAD 10: `pcb export svg --output <path> [--layers <layer>]... <input>`
-pub async fn export_svg_pcb(cli: &str, pcb: &Path, output: &Path, layers: &[&str]) -> Result<()> {
+/// KiCAD 10: `pcb export svg --output <path> [--layers <csv>] <input>`
+pub async fn export_svg_pcb(
+    cli: &str,
+    pcb: &Path,
+    output: &Path,
+    layers: &[&str],
+    black_and_white: bool,
+) -> Result<()> {
     let mut args = vec!["pcb", "export", "svg", "--output", output.to_str().unwrap()];
-    for layer in layers {
+    let layers_csv = layers.join(",");
+    if !layers_csv.is_empty() {
         args.push("--layers");
-        args.push(layer);
+        args.push(&layers_csv);
     }
+    if black_and_white {
+        args.push("--black-and-white");
+    }
+    args.push("--mode-single");
     args.push(pcb.to_str().unwrap());
     run_cli(cli, &args, LONG_TIMEOUT).await?;
     Ok(())
@@ -381,7 +417,13 @@ pub async fn export_svg_pcb(cli: &str, pcb: &Path, output: &Path, layers: &[&str
 
 /// KiCAD 10: `pcb export <format> --output <path> <input>`
 /// Supported 3D formats: step, vrml, glb, brep, stl, ply, stpz, u3d, xao, 3dpdf
-pub async fn export_3d(cli: &str, pcb: &Path, output: &Path, format: &str) -> Result<()> {
+pub async fn export_3d(
+    cli: &str,
+    pcb: &Path,
+    output: &Path,
+    format: &str,
+    include_unspecified: bool,
+) -> Result<()> {
     let subcommand = match format.to_lowercase().as_str() {
         "step" | "stp" => "step",
         "vrml" | "wrl" => "vrml",
@@ -398,14 +440,17 @@ pub async fn export_3d(cli: &str, pcb: &Path, output: &Path, format: &str) -> Re
             other
         ),
     };
-    let args = vec![
+    let mut args = vec![
         "pcb",
         "export",
         subcommand,
         "--output",
         output.to_str().unwrap(),
-        pcb.to_str().unwrap(),
     ];
+    if !include_unspecified {
+        args.push("--no-unspecified");
+    }
+    args.push(pcb.to_str().unwrap());
     run_cli(cli, &args, LONG_TIMEOUT).await?;
     Ok(())
 }
@@ -417,6 +462,8 @@ pub async fn export_position_file(
     pcb: &Path,
     output: &Path,
     format: &str,
+    side: &str,
+    units: &str,
 ) -> Result<()> {
     let args = [
         "pcb",
@@ -426,6 +473,10 @@ pub async fn export_position_file(
         output.to_str().unwrap(),
         "--format",
         format,
+        "--side",
+        side,
+        "--units",
+        units,
         pcb.to_str().unwrap(),
     ];
     run_cli(cli, &args, LONG_TIMEOUT).await?;
@@ -549,4 +600,147 @@ pub async fn render_pcb_png(cli: &str, pcb: &Path, output: &Path, layers: &[&str
     args.push(pcb.to_str().unwrap());
     run_cli(cli, &args, LONG_TIMEOUT).await?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod argument_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fake_cli() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("kicad-cli");
+        let log = dir.path().join("args.txt");
+        let body = format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display());
+        std::fs::write(&script, body).unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        (dir, script, log)
+    }
+
+    fn logged_args(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn gerber_and_drill_use_kicad10_argument_shapes() {
+        let (_dir, cli, log) = fake_cli();
+        export_gerber(
+            cli.to_str().unwrap(),
+            Path::new("board.kicad_pcb"),
+            Path::new("fab"),
+            &["F.Cu", "Edge.Cuts"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            logged_args(&log),
+            [
+                "pcb",
+                "export",
+                "gerbers",
+                "--output",
+                "fab",
+                "--layers",
+                "F.Cu,Edge.Cuts",
+                "board.kicad_pcb"
+            ]
+        );
+
+        export_drill(
+            cli.to_str().unwrap(),
+            Path::new("board.kicad_pcb"),
+            Path::new("fab"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            logged_args(&log),
+            [
+                "pcb",
+                "export",
+                "drill",
+                "--output",
+                "fab",
+                "board.kicad_pcb"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pdf_and_svg_honor_layers_color_and_single_file_mode() {
+        let (_dir, cli, log) = fake_cli();
+        export_pdf(
+            cli.to_str().unwrap(),
+            Path::new("board.kicad_pcb"),
+            Path::new("board.pdf"),
+            &["F.Cu", "Edge.Cuts"],
+            true,
+        )
+        .await
+        .unwrap();
+        let args = logged_args(&log);
+        assert!(args.windows(2).any(|v| v == ["--layers", "F.Cu,Edge.Cuts"]));
+        assert!(args.iter().any(|v| v == "--black-and-white"));
+        assert!(args.iter().any(|v| v == "--mode-single"));
+
+        export_svg_pcb(
+            cli.to_str().unwrap(),
+            Path::new("board.kicad_pcb"),
+            Path::new("board.svg"),
+            &["B.Cu"],
+            false,
+        )
+        .await
+        .unwrap();
+        let args = logged_args(&log);
+        assert!(args.windows(2).any(|v| v == ["--layers", "B.Cu"]));
+        assert!(!args.iter().any(|v| v == "--black-and-white"));
+        assert!(args.iter().any(|v| v == "--mode-single"));
+    }
+
+    #[tokio::test]
+    async fn bom_3d_and_position_options_are_forwarded() {
+        let (_dir, cli, log) = fake_cli();
+        export_bom(
+            cli.to_str().unwrap(),
+            Path::new("design.kicad_sch"),
+            Path::new("bom.csv"),
+            "csv",
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(logged_args(&log).iter().any(|v| v == "--exclude-dnp"));
+
+        export_3d(
+            cli.to_str().unwrap(),
+            Path::new("board.kicad_pcb"),
+            Path::new("board.step"),
+            "step",
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(logged_args(&log).iter().any(|v| v == "--no-unspecified"));
+
+        export_position_file(
+            cli.to_str().unwrap(),
+            Path::new("board.kicad_pcb"),
+            Path::new("positions.csv"),
+            "csv",
+            "front",
+            "in",
+        )
+        .await
+        .unwrap();
+        let args = logged_args(&log);
+        assert!(args.windows(2).any(|v| v == ["--side", "front"]));
+        assert!(args.windows(2).any(|v| v == ["--units", "in"]));
+    }
 }

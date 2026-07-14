@@ -55,7 +55,7 @@ Konnect/
 │   │       ├── router/
 │   │       │   ├── mod.rs           # ToolRouter: load/unload toolsets
 │   │       │   ├── registry.rs      # Static toolset metadata + tools_for() dispatcher
-│   │       │   └── meta_tools.rs    # 4 always-visible meta-tools
+│   │       │   └── meta_tools.rs    # 6 always-visible meta-tools
 │   │       └── tools/
 │   │           ├── mod.rs            # ToolDef, ToolContext, tool! macro, helpers, kicad_config_dir(), resolve_lib_symbol()
 │   │           ├── cli.rs            # kicad-cli v10 subprocess wrapper (verified against actual binary)
@@ -65,14 +65,14 @@ Konnect/
 │   │           ├── sch_wiring.rs     # 19 tools (incl. connect_pins, power symbol embedding)
 │   │           ├── sch_analysis.rs   # 15 tools (union-find net graph, connectivity)
 │   │           ├── sch_batch.rs      # 10 tools (single-read/single-write atomic operations)
-│   │           ├── sch_export.rs     # 7 tools (SVG/PDF/netlist/ERC)
+│   │           ├── sch_export.rs     # 6 tools (SVG/PDF/netlist/ERC)
 │   │           ├── sch_hierarchy.rs  # 12 tools (typed Sheet model, sheet CRUD + hierarchy/page queries + pin lifecycle)
 │   │           ├── pcb_board.rs      # 11 tools (S-expr file editing, IPC fallback, SVG logo import)
 │   │           ├── pcb_components.rs # 13 tools (IPC real-time via NNG+protobuf)
 │   │           ├── pcb_routing.rs    # 12 tools (traces, vias, nets, netclasses)
 │   │           ├── pcb_export.rs     # 13 tools (Gerber, PDF, 3D, DRC, DXF/GenCAD/IPC-2581/ODB++)
 │   │           ├── library.rs        # 14 tools (symbol/footprint library management)
-│   │           ├── integration.rs    # 11 tools (JLCPCB SQLite, Freerouting, datasheets)
+│   │           ├── integration.rs    # 9 tools (JLCPCB SQLite, Freerouting, datasheets)
 │   │           ├── verification.rs   # 8 tools (DRC, design rules, KiCAD UI)
 │   │           ├── config.rs         # 7 tools (user/project config, design rules)
 │   │           ├── design_review.rs  # 6 tools (decoupling/connection/power/DFM audits)
@@ -111,7 +111,7 @@ Konnect/
 │
 └── .github/workflows/
     ├── ci.yml                        # Check + test + clippy on 3 platforms
-    ├── linux-ci.yml                  # Five-distro build/package matrix + viewer smoke
+    ├── linux-ci.yml                  # Seven-environment build/package matrix + viewer smoke
     ├── e2e-kicad.yml                 # Real KiCAD CLI/GUI and IPC regression coverage
     └── release.yml                   # Build binaries + PCM archives on tag push
 ```
@@ -206,7 +206,7 @@ Source: [`crates/konnect-core/src/observability.rs`](crates/konnect-core/src/obs
 
 The server does NOT expose all 185 tools in `tools/list` by default — that would cost ~23K tokens of context on every listing. Instead:
 
-- **Startup**: only `STARTER_KIT` toolsets are pre-loaded (see `router/registry.rs::STARTER_KIT`). Currently: `project`, `config`. Combined with the 4 meta-tools, baseline `tools/list` is ~17 tools ≈ 2K tokens.
+- **Startup**: only `STARTER_KIT` toolsets are pre-loaded (see `router/registry.rs::STARTER_KIT`). Currently: `project`, `config`. Combined with the 6 meta-tools, baseline `tools/list` is 19 tools ≈ 2K tokens.
 - **On demand**: the LLM reads `list_toolboxes` → calls `load_toolset(name)` to expose a toolset's tools in subsequent `tools/list` responses. `unload_toolset(name)` prunes them when the task shifts.
 - **`tools/list_changed` notification**: sent on every load/unload so MCP clients refresh their local tool cache.
 - **Error recovery**: if the LLM calls an unloaded tool, `handler.rs` returns an actionable error naming the toolset that owns it (so the LLM can load it and retry in one hop — no extra `list_toolboxes` round-trip).
@@ -249,13 +249,13 @@ watch-directory, render-snapshot, event-debounce, and incremental-render-selecti
 `files_needing_render`, `render_all`'s error handling) — the actual `kicad-cli` subprocess call
 and Tauri command/event plumbing stay thin and untested, matching this codebase's existing
 convention for other `kicad-cli`-calling code. Linux parity CI builds and tests the viewer on
-all five distro containers and launches it under Xvfb on Ubuntu; Windows E2E also builds it for
+all seven distro containers and launches it under Xvfb on Ubuntu; Windows E2E also builds it for
 PCM packaging.
 
 ## Linux CI and release gates
 
-- `.github/workflows/linux-ci.yml` checks the workspace on Ubuntu 24.04, Ubuntu
-  22.04, Debian 12, Fedora 44, and Arch containers; builds/tests the Tauri viewer;
+- `.github/workflows/linux-ci.yml` checks the workspace on Ubuntu 26.04, Ubuntu
+  24.04, Ubuntu 22.04, Debian 13, Debian 12, Fedora 44, and Arch containers; builds/tests the Tauri viewer;
   assembles and installs the PCM; and runs a separate viewer GUI smoke test.
 - `.github/workflows/e2e-kicad.yml` runs on pull requests, weekly, release tags,
   and manual dispatch. It installs KiCAD 10, its standard libraries, and demos on
