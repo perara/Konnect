@@ -1,0 +1,11 @@
+# Config for running Konnect as a hosted HTTP MCP server in a container.
+# Used by docker-compose.yml and available in the image at
+# /etc/konnect/konnect.toml (pass it with `konnect --config`).
+#
+# Binds 0.0.0.0 so the port is reachable from outside the container. The
+# server still rejects browser requests whose Origin is not localhost
+# (DNS-rebinding protection); non-browser MCP clients send no Origin and pass.
+
+transport = "http"
+http_address = "0.0.0.0:3000"
+log_level = "info"

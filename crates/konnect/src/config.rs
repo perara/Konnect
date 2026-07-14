@@ -259,4 +259,21 @@ mod tests {
         let c = Config::load_from(f.path()).unwrap();
         assert_eq!(c.log_level, "debug");
     }
+
+    // The config baked into the Docker image (docker/konnect.toml) must keep
+    // parsing into HTTP mode bound to 0.0.0.0 -- otherwise a hosted container
+    // would silently fall back to stdio or bind to loopback and be unreachable.
+    // Parses the real shipped file so config-schema drift breaks this test.
+    #[test]
+    fn shipped_docker_config_serves_http_on_all_interfaces() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/konnect.toml");
+        let c = Config::load_from(&path).unwrap();
+        assert!(matches!(c.transport, TransportMode::Http));
+        assert!(
+            c.http_address.starts_with("0.0.0.0:"),
+            "docker config must bind all interfaces, got {}",
+            c.http_address
+        );
+    }
 }
