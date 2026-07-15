@@ -112,24 +112,51 @@ pub async fn run_erc(cli: &str, schematic: &Path) -> Result<Vec<ErcViolation>> {
 }
 
 fn parse_erc_json(raw: &serde_json::Value) -> Vec<ErcViolation> {
-    let arr = match raw.get("violations").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
+    // KiCAD's ERC report (https://schemas.kicad.org/erc.v1.json) nests
+    // violations per sheet — { "sheets": [ { "path": …, "violations": […] } ] }
+    // — with positions on the affected items. There is no top-level
+    // "violations" key (that's the DRC report's shape), so reading one here
+    // silently returned zero violations for every schematic.
+    let Some(sheets) = raw.get("sheets").and_then(|s| s.as_array()) else {
+        return Vec::new();
     };
 
-    arr.iter()
-        .map(|v| ErcViolation {
-            severity: v["severity"].as_str().unwrap_or("error").to_string(),
-            description: v["description"].as_str().unwrap_or("").to_string(),
-            sheet: v["sheet"].as_str().map(String::from),
-            pos: v.get("pos").and_then(|p| {
-                Some(ErcPos {
-                    x: p["x"].as_f64()?,
-                    y: p["y"].as_f64()?,
-                })
-            }),
-        })
-        .collect()
+    let mut out = Vec::new();
+    for sheet in sheets {
+        let sheet_path = sheet.get("path").and_then(|p| p.as_str()).map(String::from);
+        let Some(violations) = sheet.get("violations").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for v in violations {
+            let first_item = v
+                .get("items")
+                .and_then(|i| i.as_array())
+                .and_then(|i| i.first());
+            let mut description = v["description"].as_str().unwrap_or("").to_string();
+            // The per-item description names the offender ("Symbol R1 Pin 1…")
+            // — without it "Pin not connected" is unactionable.
+            if let Some(detail) = first_item
+                .and_then(|item| item.get("description"))
+                .and_then(|d| d.as_str())
+            {
+                if !detail.is_empty() {
+                    description = format!("{}: {}", description, detail);
+                }
+            }
+            out.push(ErcViolation {
+                severity: v["severity"].as_str().unwrap_or("error").to_string(),
+                description,
+                sheet: sheet_path.clone(),
+                pos: first_item.and_then(|item| item.get("pos")).and_then(|p| {
+                    Some(ErcPos {
+                        x: p["x"].as_f64()?,
+                        y: p["y"].as_f64()?,
+                    })
+                }),
+            });
+        }
+    }
+    out
 }
 
 // ─── DRC ─────────────────────────────────────────────────────────────────────
@@ -549,4 +576,83 @@ pub async fn render_pcb_png(cli: &str, pcb: &Path, output: &Path, layers: &[&str
     args.push(pcb.to_str().unwrap());
     run_cli(cli, &args, LONG_TIMEOUT).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod erc_parse_tests {
+    use super::*;
+
+    /// Shape produced by `kicad-cli sch erc --format json` (KiCAD 10.0.3,
+    /// schema https://schemas.kicad.org/erc.v1.json), trimmed to the fields
+    /// the parser touches. Captured from a real run on a 2-resistor divider.
+    fn real_report() -> serde_json::Value {
+        serde_json::json!({
+            "$schema": "https://schemas.kicad.org/erc.v1.json",
+            "coordinate_units": "mm",
+            "kicad_version": "10.0.3",
+            "sheets": [
+                {
+                    "path": "/",
+                    "uuid_path": "/14ad3364-2bf7-4e0f-ab6e-27bd0021e859",
+                    "violations": [
+                        {
+                            "description": "Pin not connected",
+                            "items": [
+                                {
+                                    "description": "Symbol R1 Pin 1 [Passive, Line]",
+                                    "pos": { "x": 1.0033, "y": 0.762 },
+                                    "uuid": "bf26e4e8-972e-4f6c-8144-fe6b3fdd68ad"
+                                }
+                            ],
+                            "severity": "error",
+                            "type": "pin_not_connected"
+                        },
+                        {
+                            "description": "Pin not connected",
+                            "items": [
+                                {
+                                    "description": "Symbol R2 Pin 2 [Passive, Line]",
+                                    "pos": { "x": 1.0033, "y": 1.143 },
+                                    "uuid": "da98d3c5-aa74-4df3-8151-0d6e1e166975"
+                                }
+                            ],
+                            "severity": "warning",
+                            "type": "pin_not_connected"
+                        }
+                    ]
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn parses_violations_nested_under_sheets() {
+        let violations = parse_erc_json(&real_report());
+        assert_eq!(
+            violations.len(),
+            2,
+            "must flatten sheets[].violations — a top-level 'violations' key does not exist in ERC reports"
+        );
+        assert_eq!(violations[0].severity, "error");
+        assert!(violations[0].description.contains("Pin not connected"));
+        assert!(
+            violations[0].description.contains("R1"),
+            "description should name the offending item"
+        );
+        assert_eq!(violations[0].sheet.as_deref(), Some("/"));
+        let pos = violations[0].pos.as_ref().expect("position from items[0]");
+        assert!((pos.x - 1.0033).abs() < 1e-9);
+        assert_eq!(violations[1].severity, "warning");
+    }
+
+    #[test]
+    fn empty_or_alien_reports_yield_no_violations() {
+        assert!(parse_erc_json(&serde_json::json!({})).is_empty());
+        assert!(parse_erc_json(&serde_json::json!({ "sheets": [] })).is_empty());
+        // DRC-shaped input (top-level violations) is not an ERC report.
+        assert!(
+            parse_erc_json(&serde_json::json!({ "violations": [{ "severity": "error" }] }))
+                .is_empty()
+        );
+    }
 }
