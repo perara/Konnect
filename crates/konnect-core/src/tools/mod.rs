@@ -328,6 +328,89 @@ pub fn ensure_root_uuid(sch: &mut konnect_schematic_editor::Schematic) -> String
     }
 }
 
+// ─── Schematic text helpers ──────────────────────────────────────────────────
+
+/// Byte range of the placed `(symbol …)` block whose Reference property is
+/// `reference`, for the text-editing tool paths.
+///
+/// Works regardless of indentation — eeschema saves with tabs, this crate's
+/// writer uses two spaces — and skips library definitions inside `lib_symbols`,
+/// which carry a Reference property of their own (`"R"`, `"#PWR"`, or whatever
+/// a hand-authored library sets) but never a `lib_id`. Only placed instances
+/// have one, so that's the discriminator.
+pub fn find_symbol_instance_block(content: &str, reference: &str) -> Option<(usize, usize)> {
+    let ref_search = format!(r#"(property "Reference" "{reference}""#);
+    let mut from = 0usize;
+
+    while let Some(rel) = content[from..].find(&ref_search) {
+        let ref_pos = from + rel;
+        if let Some((start, end)) =
+            konnect_sexp::writer::find_enclosing_block(content, "symbol", ref_pos)
+        {
+            if content[start..end].contains("(lib_id ") {
+                return Some((start, end));
+            }
+        }
+        from = ref_pos + ref_search.len();
+    }
+    None
+}
+
+#[cfg(test)]
+mod symbol_block_tests {
+    use super::*;
+
+    /// Instance blocks as eeschema writes them: tab-indented, and preceded by a
+    /// lib_symbols definition carrying its own Reference property.
+    const EESCHEMA_STYLE: &str = "(kicad_sch\n\t(lib_symbols\n\t\t(symbol \"Device:R\"\n\t\t\t(property \"Reference\" \"R\"\n\t\t\t\t(at 2.032 0 90)\n\t\t\t)\n\t\t)\n\t)\n\t(symbol\n\t\t(lib_id \"Device:R\")\n\t\t(at 100 80 0)\n\t\t(property \"Reference\" \"R1\"\n\t\t\t(at 102 78 0)\n\t\t)\n\t\t(property \"Value\" \"10k\"\n\t\t\t(at 102 82 0)\n\t\t)\n\t)\n)\n";
+
+    /// Same shape, two-space indented, as this crate's writer emits.
+    const KONNECT_STYLE: &str = "(kicad_sch\n  (lib_symbols\n    (symbol \"Device:R\"\n      (property \"Reference\" \"R\"\n        (at 2.032 0 90)\n      )\n    )\n  )\n  (symbol\n    (lib_id \"Device:R\")\n    (at 100 80 0)\n    (property \"Reference\" \"R1\"\n      (at 102 78 0)\n    )\n  )\n)\n";
+
+    #[test]
+    fn finds_instance_in_tab_indented_file() {
+        let (start, end) = find_symbol_instance_block(EESCHEMA_STYLE, "R1").expect("R1 block");
+        let block = &EESCHEMA_STYLE[start..end];
+        assert!(block.starts_with("(symbol"));
+        assert!(block.contains("(lib_id \"Device:R\")"));
+        assert!(block.contains("\"R1\""));
+        assert!(
+            block.contains("\"10k\""),
+            "block must span the whole symbol"
+        );
+    }
+
+    #[test]
+    fn finds_instance_in_space_indented_file() {
+        let (start, end) = find_symbol_instance_block(KONNECT_STYLE, "R1").expect("R1 block");
+        assert!(KONNECT_STYLE[start..end].contains("(lib_id \"Device:R\")"));
+    }
+
+    #[test]
+    fn library_definition_is_not_mistaken_for_an_instance() {
+        // A hand-authored library whose default Reference matches a placed
+        // instance's designator must not shadow the instance.
+        let sch = "(kicad_sch\n\t(lib_symbols\n\t\t(symbol \"Custom:Thing\"\n\t\t\t(property \"Reference\" \"U1\"\n\t\t\t\t(at 0 0 0)\n\t\t\t)\n\t\t)\n\t)\n\t(symbol\n\t\t(lib_id \"Custom:Thing\")\n\t\t(property \"Reference\" \"U1\"\n\t\t\t(at 5 5 0)\n\t\t)\n\t)\n)\n";
+        let (start, end) = find_symbol_instance_block(sch, "U1").expect("instance");
+        assert!(
+            sch[start..end].contains("(lib_id "),
+            "must skip the lib_symbols definition and return the placed instance"
+        );
+    }
+
+    #[test]
+    fn unknown_reference_is_none() {
+        assert!(find_symbol_instance_block(EESCHEMA_STYLE, "R99").is_none());
+    }
+
+    #[test]
+    fn reference_prefix_does_not_match_longer_designator() {
+        // "R1" must not match the R12 instance.
+        let sch = "(kicad_sch\n\t(symbol\n\t\t(lib_id \"Device:R\")\n\t\t(property \"Reference\" \"R12\"\n\t\t\t(at 1 1 0)\n\t\t)\n\t)\n)\n";
+        assert!(find_symbol_instance_block(sch, "R1").is_none());
+    }
+}
+
 #[cfg(test)]
 mod arg_helper_tests {
     use super::*;

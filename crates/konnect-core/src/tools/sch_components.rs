@@ -7,13 +7,14 @@
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{
-    get_path, opt_f64, opt_str, project_name_for, require_f64, require_str, ToolContext, ToolDef,
+    find_symbol_instance_block, get_path, opt_f64, opt_str, project_name_for, require_f64,
+    require_str, ToolContext, ToolDef,
 };
 use konnect_schematic_editor as cse;
 use konnect_sexp::{
     geometry::snap_point,
     schematic::{extract_lib_pins, extract_symbol_instances, pin_endpoint, read_schematic},
-    writer::{apply_edits, find_block_with_leading_whitespace, new_uuid, write_atomic, SexpEdit},
+    writer::{apply_edits, new_uuid, write_atomic, SexpEdit},
 };
 use serde_json::json;
 
@@ -451,83 +452,78 @@ async fn handle_edit_schematic_component(
     let mut content = std::fs::read_to_string(&sch_path)?;
     let mut changed = Vec::new();
 
-    // Helper: update a property field value in-place
-    let update_field = |content: &str, ref_: &str, field: &str, new_val: &str| -> (String, bool) {
-        // Pattern: (property "FieldName" "OldValue"
-        //           surrounded by the enclosing symbol block for 'ref_'
-        // Simple approach: find the reference location, then within that symbol block
-        // update the named property.
-        let ref_search = format!(r#"(property "Reference" "{ref_}""#);
-        let ref_pos = match content.find(&ref_search) {
-            Some(p) => p,
-            None => return (content.to_string(), false),
+    // Helper: update a property field value in-place within the symbol block
+    // for `ref_`. Returns the reason on failure so the caller can report it
+    // instead of silently claiming success.
+    let update_field =
+        |content: &str, ref_: &str, field: &str, new_val: &str| -> Result<String, String> {
+            let (sym_start, sym_end) = find_symbol_instance_block(content, ref_)
+                .ok_or_else(|| format!("symbol '{ref_}' not found in this schematic"))?;
+            let sym_block = &content[sym_start..sym_end];
+            let field_search = format!(r#"(property "{field}" ""#);
+            let field_offset = sym_block
+                .find(&field_search)
+                .map(|o| sym_start + o + field_search.len())
+                .ok_or_else(|| format!("'{ref_}' has no '{field}' property"))?;
+            // Find the closing quote of the current value
+            let val_end = content[field_offset..]
+                .find('"')
+                .map(|o| field_offset + o)
+                .ok_or_else(|| format!("'{field}' property on '{ref_}' is malformed"))?;
+            Ok(format!(
+                "{}{}{}",
+                &content[..field_offset],
+                new_val,
+                &content[val_end..]
+            ))
         };
-        // Find the symbol block around this reference
-        let sym_start_str = "\n  (symbol";
-        let before = &content[..ref_pos];
-        let sym_start = match before.rfind(sym_start_str) {
-            Some(p) => p + 1,
-            None => return (content.to_string(), false),
-        };
-        let (_, sym_end) = match find_block_with_leading_whitespace(content, sym_start) {
-            Some(r) => r,
-            None => return (content.to_string(), false),
-        };
-        let sym_block = &content[sym_start..sym_end];
-        let field_search = format!(r#"(property "{field}" ""#);
-        let field_offset = match sym_block.find(&field_search) {
-            Some(o) => sym_start + o + field_search.len(),
-            None => return (content.to_string(), false),
-        };
-        // Find the closing quote of the current value
-        let val_end = match content[field_offset..].find('"') {
-            Some(o) => field_offset + o,
-            None => return (content.to_string(), false),
-        };
-        let new_content = format!(
-            "{}{}{}",
-            &content[..field_offset],
-            new_val,
-            &content[val_end..]
-        );
-        (new_content, true)
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut apply = |content: &mut String, field: &str, new_val: &str| match update_field(
+        content, &reference, field, new_val,
+    ) {
+        Ok(updated) => {
+            *content = updated;
+            changed.push(format!("{} → {}", field, new_val));
+        }
+        Err(why) => errors.push(format!("{field}: {why}")),
     };
 
     if let Some(new_ref) = opt_str(args, "new_reference") {
-        let (c, ok) = update_field(&content, &reference, "Reference", new_ref);
-        if ok {
-            content = c;
-            changed.push(format!("Reference → {}", new_ref));
-        }
+        apply(&mut content, "Reference", new_ref);
     }
     if let Some(val) = opt_str(args, "value") {
-        let (c, ok) = update_field(&content, &reference, "Value", val);
-        if ok {
-            content = c;
-            changed.push(format!("Value → {}", val));
-        }
+        apply(&mut content, "Value", val);
     }
     if let Some(fp) = opt_str(args, "footprint") {
-        let (c, ok) = update_field(&content, &reference, "Footprint", fp);
-        if ok {
-            content = c;
-            changed.push(format!("Footprint → {}", fp));
-        }
+        apply(&mut content, "Footprint", fp);
     }
     if let Some(ds) = opt_str(args, "datasheet") {
-        let (c, ok) = update_field(&content, &reference, "Datasheet", ds);
-        if ok {
-            content = c;
-            changed.push(format!("Datasheet → {}", ds));
-        }
+        apply(&mut content, "Datasheet", ds);
     }
 
-    write_atomic(&sch_path, &content)?;
+    // A request that changed nothing is a failure, not a success — silently
+    // reporting `"changes": []` is what let the tab-indentation bug hide.
+    if changed.is_empty() && !errors.is_empty() {
+        return Ok(CallToolResult::error(format!(
+            "No fields were updated on '{}': {}",
+            reference,
+            errors.join("; ")
+        )));
+    }
 
-    Ok(CallToolResult::json(&json!({
+    if !changed.is_empty() {
+        write_atomic(&sch_path, &content)?;
+    }
+
+    let mut result = json!({
         "reference": reference,
         "changes": changed
-    })))
+    });
+    if !errors.is_empty() {
+        result["errors"] = json!(errors);
+    }
+    Ok(CallToolResult::json(&result))
 }
 
 async fn handle_get_schematic_component(
@@ -892,25 +888,14 @@ async fn handle_add_component_annotation(
     let content = std::fs::read_to_string(&sch_path)?;
 
     // Find the symbol block for this reference
-    let ref_search = format!(r#"(property "Reference" "{reference}""#);
-    let ref_pos = match content.find(&ref_search) {
-        Some(o) => o,
+    let (sym_start, sym_end) = match find_symbol_instance_block(&content, &reference) {
+        Some(r) => r,
         None => {
             return Ok(CallToolResult::error(format!(
                 "Component '{}' not found",
                 reference
             )))
         }
-    };
-
-    let before = &content[..ref_pos];
-    let sym_start = match before.rfind("\n  (symbol") {
-        Some(o) => o + 1,
-        None => return Ok(CallToolResult::error("Could not find symbol block")),
-    };
-    let (_, sym_end) = match find_block_with_leading_whitespace(&content, sym_start) {
-        Some(r) => r,
-        None => return Ok(CallToolResult::error("Could not parse symbol block")),
     };
 
     // Find the position just before (instances in the symbol block, or before closing paren
@@ -961,18 +946,7 @@ async fn handle_group_components(
     let mut grouped = Vec::new();
 
     for reference in &refs {
-        let ref_search = format!(r#"(property "Reference" "{reference}""#);
-        let ref_pos = match content.find(&ref_search) {
-            Some(o) => o,
-            None => continue,
-        };
-
-        let before = &content[..ref_pos];
-        let sym_start = match before.rfind("\n  (symbol") {
-            Some(o) => o + 1,
-            None => continue,
-        };
-        let (_, sym_end) = match find_block_with_leading_whitespace(&content, sym_start) {
+        let (sym_start, sym_end) = match find_symbol_instance_block(&content, reference) {
             Some(r) => r,
             None => continue,
         };
@@ -1017,9 +991,8 @@ async fn handle_replace_component(
     let mut content = std::fs::read_to_string(&sch_path)?;
 
     // Find the symbol block for this reference
-    let ref_search = format!(r#"(property "Reference" "{reference}""#);
-    let ref_pos = match content.find(&ref_search) {
-        Some(o) => o,
+    let (sym_start, sym_end) = match find_symbol_instance_block(&content, &reference) {
+        Some(r) => r,
         None => {
             return Ok(CallToolResult::error(format!(
                 "Component '{}' not found",
@@ -1028,16 +1001,11 @@ async fn handle_replace_component(
         }
     };
 
-    let before = &content[..ref_pos];
-    let sym_start = match before.rfind("\n  (symbol") {
-        Some(o) => o + 1,
-        None => return Ok(CallToolResult::error("Could not find symbol block")),
-    };
-
-    // Find the (lib_id "OLD") and replace it
-    let sym_block_start = &content[sym_start..];
+    // Find the (lib_id "OLD") and replace it — searching only within this
+    // symbol's block, so a malformed instance can't reach into the next one.
+    let sym_block = &content[sym_start..sym_end];
     let lib_id_pat = "(lib_id \"";
-    let lib_id_rel = match sym_block_start.find(lib_id_pat) {
+    let lib_id_rel = match sym_block.find(lib_id_pat) {
         Some(o) => o,
         None => {
             return Ok(CallToolResult::error(
