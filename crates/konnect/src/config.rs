@@ -95,17 +95,21 @@ impl Config {
         }
 
         let mut config = config.unwrap_or_default();
+        config.apply_env_fallbacks();
+        Ok(config)
+    }
 
-        // Env var wins over an unset/blank ipc_address either way.
-        if config.ipc_address.is_empty() {
+    /// Env var wins over an unset/blank ipc_address either way. Must run on
+    /// every load path — including `--config <file>`, which is how KiCAD
+    /// itself launches the server (with KICAD_API_SOCKET in the environment).
+    pub fn apply_env_fallbacks(&mut self) {
+        if self.ipc_address.is_empty() {
             if let Ok(sock) = std::env::var("KICAD_API_SOCKET") {
                 if !sock.is_empty() {
-                    config.ipc_address = sock;
+                    self.ipc_address = sock;
                 }
             }
         }
-
-        Ok(config)
     }
 
     /// Load config from a specific file path. Auto-detects JSON vs TOML by extension.
@@ -295,14 +299,14 @@ mod tests {
         let mut c = Config::load_from(f.path()).unwrap();
         assert_eq!(c.ipc_address, "", "sanity: file's blank value loaded as-is");
 
-        if c.ipc_address.is_empty() {
-            if let Ok(sock) = std::env::var("KICAD_API_SOCKET") {
-                if !sock.is_empty() {
-                    c.ipc_address = sock;
-                }
-            }
-        }
+        c.apply_env_fallbacks();
         assert_eq!(c.ipc_address, "ipc://env-wins.sock");
+
+        // But an explicit file value must out-rank the env var.
+        let f = write_temp("json", r#"{"ipc_socket_path": "ipc://file-wins.sock"}"#);
+        let mut c = Config::load_from(f.path()).unwrap();
+        c.apply_env_fallbacks();
+        assert_eq!(c.ipc_address, "ipc://file-wins.sock");
 
         std::env::remove_var("KICAD_API_SOCKET");
     }
