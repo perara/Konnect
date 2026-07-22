@@ -75,7 +75,7 @@ fn pcb_pad_board_position() {
 
     let fp_at = r1.find("at").unwrap();
     let fp_x = fp_at.get_f64(1).unwrap();
-    let fp_y = fp_at.get_f64(2).unwrap();
+    let _fp_y = fp_at.get_f64(2).unwrap();
 
     let pads = r1.find_all("pad");
     let pad1_at = pads[0].find("at").unwrap();

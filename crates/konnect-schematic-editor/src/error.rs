@@ -10,6 +10,11 @@ pub enum Error {
 
     #[error("Missing required field '{0}'")]
     MissingField(&'static str),
+
+    #[error(
+        "KiCAD library symbol '{0}' could not be resolved from the installed symbol libraries"
+    )]
+    LibrarySymbolNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

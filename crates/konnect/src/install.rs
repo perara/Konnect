@@ -6,7 +6,7 @@
 //! - `status` — show install state with [+]/[-] markers
 //! - `skill <name>` — print a skill's markdown to stdout (for hook integration)
 //! - Silent install on first MCP launch (no stdout, stderr logging only)
-//! - KiCAD auto-detection on Windows
+//! - KiCAD auto-detection on Windows, macOS, and Linux
 
 use crate::manifest::{AGENTS, HOOK_SKILLS, SKILLS};
 use anyhow::{Context, Result};
@@ -220,7 +220,7 @@ pub fn print_status() -> Result<()> {
 }
 
 /// Print a skill's content to stdout. Used by hooks:
-/// `konnect.exe skill <name>` outputs markdown that Claude Code
+/// `konnect skill <name>` outputs markdown that Claude Code
 /// injects before/after a tool call.
 pub fn print_skill_content(name: &str) -> Result<()> {
     // Check hook skills first (they have short inline content)
@@ -273,8 +273,7 @@ pub fn run_double_click_install() -> Result<()> {
     println!(r#"  }}"#);
 
     println!("\nConfig locations:");
-    println!("  Claude Desktop: %APPDATA%\\Claude\\claude_desktop_config.json");
-    println!("  Claude Code:    .mcp.json in your project root");
+    print_client_config_locations();
     println!("\nAfter editing the config, restart Claude.\n");
 
     println!("Press Enter to close...");
@@ -290,7 +289,22 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 fn data_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".konnect"))
+    #[cfg(target_os = "windows")]
+    {
+        return Ok(home_dir()?.join(".konnect"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(home_dir()?.join(".konnect"));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Ok(std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::data_local_dir)
+            .unwrap_or(home_dir()?.join(".local").join("share"))
+            .join("konnect"))
+    }
 }
 
 fn claude_skills_dir() -> Result<PathBuf> {
@@ -306,6 +320,44 @@ fn claude_settings_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
         .join("settings.json")
+}
+
+fn print_client_config_locations() {
+    #[cfg(target_os = "windows")]
+    println!("  Claude Desktop: %APPDATA%\\Claude\\claude_desktop_config.json");
+
+    #[cfg(target_os = "macos")]
+    println!("  Claude Desktop: ~/Library/Application Support/Claude/claude_desktop_config.json");
+
+    #[cfg(target_os = "linux")]
+    println!("  MCP client:     use the client-specific MCP configuration file");
+
+    println!("  Claude Code:    .mcp.json in your project root");
+}
+
+fn hook_command(exe_str: &str, skill_name: &str) -> String {
+    // Claude executes hooks through the platform shell. Quoting is required on
+    // every platform because PCM and user-data paths may contain spaces. Serde
+    // performs the JSON escaping, so do not pre-escape Windows backslashes.
+    let quoted_exe = exe_str.replace('"', "\\\"");
+    format!("\"{}\" skill {}", quoted_exe, skill_name)
+}
+
+fn contains_skill_hook(
+    entry: &serde_json::Value,
+    hook: &crate::manifest::HookSkillManifest,
+) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|hooks| hooks.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("command").and_then(|command| command.as_str()))
+        .any(|command| command.ends_with(&format!(" skill {}", hook.name)))
+        || entry
+            .get("matcher")
+            .and_then(|matcher| matcher.as_str())
+            .is_some_and(|matcher| matcher == hook.tool_matcher)
 }
 
 /// Idempotent hook patching: adds hook entries to `~/.claude/settings.json`.
@@ -338,22 +390,17 @@ fn patch_claude_settings(exe_str: &str) -> Result<usize> {
             .as_array_mut()
             .context("hook event field is not an array")?;
 
-        // Idempotent: skip if a hook with this matcher already exists
-        let already_exists = event_arr.iter().any(|h| {
-            h.get("matcher")
-                .and_then(|m| m.as_str())
-                .map(|m| m.contains(hook.name))
-                .unwrap_or(false)
-        });
+        // Idempotent: skip if this exact Konnect skill hook already exists.
+        let already_exists = event_arr
+            .iter()
+            .any(|entry| contains_skill_hook(entry, hook));
 
         if !already_exists {
-            // Use the exe path with escaped backslashes for the command
-            let exe_escaped = exe_str.replace('\\', "\\\\");
             let entry = serde_json::json!({
                 "matcher": hook.tool_matcher,
                 "hooks": [{
                     "type": "command",
-                    "command": format!("{} skill {}", exe_escaped, hook.name)
+                    "command": hook_command(exe_str, hook.name)
                 }]
             });
             event_arr.push(entry);
@@ -397,47 +444,19 @@ fn remove_hooks_from_settings() -> Result<()> {
     Ok(())
 }
 
-/// Auto-detect a KiCAD installation.
-/// Checks standard per-platform paths for kicad-cli (plus the registry on Windows).
+/// Auto-detect the KiCAD CLI on all supported desktop platforms.
 pub fn detect_kicad() -> Option<PathBuf> {
-    // Standard paths (check these first — faster than registry)
-    #[cfg(target_os = "windows")]
-    let standard_paths: Vec<PathBuf> = [
-        r"C:\KiCad\10.0\bin\kicad-cli.exe",
-        r"C:\Program Files\KiCad\10.0\bin\kicad-cli.exe",
-        r"C:\Program Files (x86)\KiCad\10.0\bin\kicad-cli.exe",
-        r"C:\KiCad\9.0\bin\kicad-cli.exe",
-        r"C:\Program Files\KiCad\9.0\bin\kicad-cli.exe",
-        r"C:\Program Files (x86)\KiCad\9.0\bin\kicad-cli.exe",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .collect();
-
-    #[cfg(target_os = "macos")]
-    let standard_paths: Vec<PathBuf> = {
-        let mut paths = vec![
-            PathBuf::from("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"),
-            PathBuf::from("/usr/local/bin/kicad-cli"),
-        ];
-        if let Ok(home) = std::env::var("HOME") {
-            // Per-user install (KiCad.app dragged into ~/Applications)
-            paths.push(
-                PathBuf::from(home).join("Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"),
-            );
+    if let Ok(explicit) = std::env::var("KICAD_CLI") {
+        let path = PathBuf::from(explicit);
+        if path.is_file() {
+            return Some(path);
         }
-        paths
-    };
+    }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let standard_paths: Vec<PathBuf> = vec![
-        PathBuf::from("/usr/bin/kicad-cli"),
-        PathBuf::from("/usr/local/bin/kicad-cli"),
-    ];
-
-    for path in &standard_paths {
-        if path.exists() {
-            return Some(path.clone());
+    for path_str in kicad_cli_candidates() {
+        let path = PathBuf::from(path_str);
+        if path.is_file() {
+            return Some(path);
         }
     }
 
@@ -449,7 +468,53 @@ pub fn detect_kicad() -> Option<PathBuf> {
         }
     }
 
-    None
+    let command = if cfg!(target_os = "windows") {
+        "kicad-cli.exe"
+    } else {
+        "kicad-cli"
+    };
+    std::process::Command::new(command)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|_| PathBuf::from(command))
+}
+
+#[cfg(target_os = "windows")]
+fn kicad_cli_candidates() -> &'static [&'static str] {
+    &[
+        r"C:\KiCad\10.0\bin\kicad-cli.exe",
+        r"C:\Program Files\KiCad\10.0\bin\kicad-cli.exe",
+        r"C:\Program Files (x86)\KiCad\10.0\bin\kicad-cli.exe",
+        r"C:\KiCad\9.0\bin\kicad-cli.exe",
+        r"C:\Program Files\KiCad\9.0\bin\kicad-cli.exe",
+        r"C:\Program Files (x86)\KiCad\9.0\bin\kicad-cli.exe",
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn kicad_cli_candidates() -> &'static [&'static str] {
+    &[
+        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+        "/opt/homebrew/bin/kicad-cli",
+        "/usr/local/bin/kicad-cli",
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn kicad_cli_candidates() -> &'static [&'static str] {
+    &[
+        "/usr/bin/kicad-cli",
+        "/usr/local/bin/kicad-cli",
+        "/snap/bin/kicad-cli",
+        "/snap/kicad/current/usr/bin/kicad-cli",
+    ]
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn kicad_cli_candidates() -> &'static [&'static str] {
+    &[]
 }
 
 #[cfg(target_os = "windows")]
@@ -479,4 +544,48 @@ fn detect_kicad_from_registry() -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_command_quotes_paths_and_leaves_separators_alone() {
+        assert_eq!(
+            hook_command(r"C:\Program Files\Konnect\konnect.exe", "pre-pcb-ipc"),
+            r#""C:\Program Files\Konnect\konnect.exe" skill pre-pcb-ipc"#
+        );
+        assert_eq!(
+            hook_command("/home/test user/konnect", "pre-pcb-ipc"),
+            r#""/home/test user/konnect" skill pre-pcb-ipc"#
+        );
+    }
+
+    #[test]
+    fn platform_candidates_prioritize_kicad_10() {
+        let candidates = kicad_cli_candidates();
+        if !candidates.is_empty() {
+            assert!(candidates[0].contains("kicad-cli"));
+        }
+    }
+
+    #[test]
+    fn existing_hook_is_detected_by_command_or_matcher() {
+        let hook = &HOOK_SKILLS[0];
+        let by_command = serde_json::json!({
+            "matcher": "old-matcher",
+            "hooks": [{
+                "type": "command",
+                "command": "\"/opt/Konnect/konnect\" skill pre-pcb-ipc"
+            }]
+        });
+        let by_matcher = serde_json::json!({
+            "matcher": hook.tool_matcher,
+            "hooks": []
+        });
+        assert!(contains_skill_hook(&by_command, hook));
+        assert!(contains_skill_hook(&by_matcher, hook));
+        assert!(!contains_skill_hook(&serde_json::json!({}), hook));
+    }
 }

@@ -20,8 +20,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/board/board_types.proto",
     ];
 
-    // Include paths: our proto dir + protoc's well-known types
-    // The PROTOC env var points to the protoc binary; its sibling ../include/ has google protos
+    // Include paths: our proto dir + protoc's well-known types. setup-protoc
+    // places the includes next to its binary, while distro packages normally use
+    // /usr/include or /usr/local/include. PROTOC_INCLUDE lets unusual layouts opt in.
     let protoc_path = std::env::var("PROTOC").unwrap_or_else(|_| "protoc".to_string());
     let protoc_dir = std::path::Path::new(&protoc_path)
         .parent()
@@ -29,13 +30,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.join("include"))
         .unwrap_or_default();
 
-    let mut includes: Vec<&str> = vec!["proto/"];
-    let protoc_include = protoc_dir.to_str().unwrap_or("");
-    if !protoc_include.is_empty() && std::path::Path::new(protoc_include).exists() {
-        includes.push(protoc_include);
+    let mut includes = vec![std::path::PathBuf::from("proto/")];
+    if protoc_dir.join("google/protobuf/any.proto").is_file() {
+        includes.push(protoc_dir);
+    }
+    if let Some(include) = std::env::var_os("PROTOC_INCLUDE") {
+        let include = std::path::PathBuf::from(include);
+        if include.join("google/protobuf/any.proto").is_file() {
+            includes.push(include);
+        }
+    }
+    for include in ["/usr/local/include", "/usr/include"] {
+        let include = std::path::PathBuf::from(include);
+        if include.join("google/protobuf/any.proto").is_file() {
+            includes.push(include);
+        }
     }
 
-    prost_build::Config::new().compile_protos(protos, &includes)?;
+    let mut config = prost_build::Config::new();
+    // Ubuntu 22.04 ships protoc 3.12, where proto3 optional fields still
+    // require this switch. Newer protoc releases accept it as a no-op.
+    config.protoc_arg("--experimental_allow_proto3_optional");
+    config.compile_protos(protos, &includes)?;
 
     Ok(())
 }

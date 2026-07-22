@@ -58,7 +58,11 @@ if ($ViewerPath -and (Test-Path $ViewerPath)) {
 # binary it actually bundles (build-pcm.sh stamps bin/konnect for macOS/Linux).
 $pluginManifest = Get-Content "$staging/plugins/plugin.json" -Raw | ConvertFrom-Json
 foreach ($action in $pluginManifest.actions) {
-    if ($action.entrypoint -like "bin/*") { $action.entrypoint = "bin/konnect.exe" }
+    if ($action.entrypoint -like "bin/*") {
+        $parts = $action.entrypoint -split " ", 2
+        $action.entrypoint = "bin/konnect.exe"
+        if ($parts.Count -eq 2) { $action.entrypoint += " " + $parts[1] }
+    }
 }
 $pluginManifest | ConvertTo-Json -Depth 10 | Set-Content "$staging/plugins/plugin.json"
 
@@ -82,6 +86,7 @@ $metadata.versions[0] | Add-Member -NotePropertyName install_size -NotePropertyV
 # Windows build to a macOS user and vice versa. [string[]] keeps ConvertTo-Json
 # from collapsing the single-element array into a bare string.
 $metadata.versions[0] | Add-Member -NotePropertyName platforms -NotePropertyValue ([string[]]@($Platform)) -Force
+$metadata.versions[0] | Add-Member -NotePropertyName runtime -NotePropertyValue "ipc" -Force
 foreach ($field in @("download_sha256", "download_url", "download_size")) {
     $metadata.versions[0].PSObject.Properties.Remove($field)
 }

@@ -176,7 +176,7 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "annotate_schematic",
-            "Run kicad-cli to auto-assign reference designators (R? → R1, U? → U1, etc.).",
+            "Atomically assign sequential reference designators to unannotated symbols (R? → R1, U? → U1, etc.).",
             json!({
                 "type": "object",
                 "properties": {
@@ -1071,6 +1071,10 @@ async fn handle_replace_component(
 // Library symbol resolution moved to tools/mod.rs (shared with sch_wiring.rs)
 
 #[cfg(test)]
+// These tests intentionally hold a process-wide environment-variable lock
+// across async handler calls so parallel tests cannot observe a different
+// KiCAD symbol directory.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::router::ToolRouter;

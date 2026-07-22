@@ -31,12 +31,14 @@ where
     let url = format!("tcp://127.0.0.1:{port}");
 
     let listen_url = url.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
     let thread = std::thread::spawn(move || {
         let socket = nng::Socket::new(nng::Protocol::Rep0).expect("mock rep socket");
         socket
             .set_opt::<nng::options::RecvTimeout>(Some(Duration::from_secs(20)))
             .unwrap();
         socket.listen(&listen_url).expect("mock listen");
+        ready_tx.send(()).expect("signal mock readiness");
         while let Ok(msg) = socket.recv() {
             let request = match kiapi::common::ApiRequest::decode(msg.as_slice()) {
                 Ok(r) => r,
@@ -53,6 +55,7 @@ where
             }
         }
     });
+    ready_rx.recv().expect("mock listener readiness");
 
     MockKicad {
         url,

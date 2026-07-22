@@ -71,7 +71,7 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `rotate_schematic_component` | Rotate a symbol by setting its absolute rotation angle (0/90/180/270). |
 | `move_connected` | Move a symbol and stretch/shrink connected wire stubs to preserve connections. |
 | `move_region` | Move all symbols within a bounding box by a given offset. |
-| `annotate_schematic` | Run kicad-cli to auto-assign reference designators (`R?` → `R1`, `U?` → `U1`, etc.). |
+| `annotate_schematic` | Atomically assign sequential reference designators (`R?` → `R1`, `U?` → `U1`, etc.) without requiring kicad-cli. |
 | `get_schematic_pin_locations` | Get exact (X,Y) coordinates of every pin on a symbol, accounting for rotation/mirroring. |
 | `batch_get_schematic_pin_locations` | Get pin locations for multiple components in a single file read. |
 | `add_component_annotation` | Add a custom property (annotation) to a symbol instance. |
@@ -246,7 +246,7 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `export_gerber` | Export Gerber production files for all copper/mask layers using kicad-cli. |
 | `export_pdf` | Export the PCB layout to a PDF file using kicad-cli. |
 | `export_svg` | Export the PCB layout to an SVG file using kicad-cli. |
-| `export_3d` | Export the PCB as a 3D model (STEP or VRML) using kicad-cli. |
+| `export_3d` | Export the PCB to a KiCAD 10-supported 3D format (STEP, VRML, GLB, BREP, STL, PLY, STPZ, U3D, XAO, or 3D PDF). |
 | `export_bom` | Generate a Bill of Materials (BOM) CSV from the schematic's component data. |
 | `export_netlist` | Export the PCB netlist in KiCAD or IPC-D-356 format. |
 | `export_position_file` | Generate a component placement (pick-and-place) position file for SMT assembly. |
@@ -254,7 +254,7 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `export_gencad` | Export the PCB in GenCAD format using kicad-cli. |
 | `export_ipc2581` | Export the PCB in IPC-2581 format using kicad-cli — a unified fab/assembly/test data format. |
 | `export_odb` | Export the PCB in ODB++ format using kicad-cli — a unified fabrication data format. |
-| `refill_zones` | Refill all copper pour zones using kicad-cli (`zone-fill`). |
+| `refill_zones` | Refill all copper zones on the currently open board through a running KiCAD PCB Editor IPC session. |
 | `get_drc_violations` | Run the Design Rule Check and return a list of violations. |
 
 ---
@@ -319,7 +319,7 @@ Six tools, grouped into *discovery/routing* and *observability*.
 | `launch_kicad_ui` | Launch the KiCAD GUI application and optionally open a project file. |
 | `copy_routing_pattern` | Copy a routing pattern (traces and vias) from one region of the board to another. |
 | `set_layer_constraints` | Set per-layer design constraints (min trace width, clearance) in board setup. |
-| `check_clearance` | Check the physical clearance (distance) between two components on the PCB. |
+| `check_clearance` | Measure placement-origin distance between two footprints; not edge-to-edge courtyard/body/copper clearance. |
 
 ---
 
@@ -349,26 +349,26 @@ Six tools, grouped into *discovery/routing* and *observability*.
 
 | Tool | Description |
 |------|-------------|
-| `audit_decoupling` | Check that all ICs have appropriate decoupling caps. Finds power pins without nearby caps and flags wrong values. |
+| `audit_decoupling` | Use schematic connectivity heuristics to flag IC power nets with no capacitor; does not verify value or PCB distance. |
 | `audit_connections` | Check for common connection mistakes: missing pull-ups on I2C/reset, missing series resistors on LEDs, floating inputs, shorted outputs. |
 | `audit_power_rails` | Check power rail integrity: missing bulk capacitance, no test points, missing regulator output caps. |
-| `audit_manufacturing` | DFM checks for the configured fab house: component spacing, silkscreen overlap, via-in-pad, acid traps, board-outline issues. |
-| `run_design_review` | Run all available audit checks and produce a consolidated report. Call this when the user asks "is my board ready?" |
-| `check_bom_health` | Analyze the BOM for supply-chain risks: parts with no MPN, lifecycle warnings, low stock, unavailable from preferred distributors. |
+| `audit_manufacturing` | Run file-level DFM heuristics for outline presence, silkscreen overlap, minimum trace width, and component-side information. |
+| `run_design_review` | Run heuristic decoupling, connection, power-rail, BOM-field, and optional DFM audits. Formal ERC and DRC are separate. |
+| `check_bom_health` | Check schematic symbols for missing value, footprint, MPN, and LCSC fields; does not query live stock or lifecycle data. |
 
 ---
 
 ## Templates
 
 ### `templates` · 4 tools
-**Purpose:** Reference circuit library — USB-C, LDO, buck converter, STM32, I2C, LED — verified component values.
+**Purpose:** Curated reference-circuit starting points for USB-C, LDO, buck converter, STM32, I2C, and LED designs.
 **Source:** [`crates/konnect-core/src/tools/templates.rs`](crates/konnect-core/src/tools/templates.rs)
 
 | Tool | Description |
 |------|-------------|
-| `search_templates` | Search the reference circuit template library. Returns matches for common subcircuits; templates have verified component values. |
+| `search_templates` | Search the curated reference-circuit template library. Values and connections still require part-specific verification. |
 | `get_template` | Get full details for a template: components, connections, design notes. Use the template ID from `search_templates`. |
-| `apply_template` | Instantiate a template into the current schematic. Places all components and wires per the connection map; `net_mappings` re-binds template nets to project nets. |
+| `apply_template` | Atomically place a template's components with embedded library definitions and return its mapped connection plan/reference map for explicit follow-up wiring. |
 | `list_template_categories` | List all available template categories and the number of templates in each. |
 
 **Built-in templates** (loaded by `load_all_templates` in `templates.rs`):
@@ -384,9 +384,9 @@ Six tools, grouped into *discovery/routing* and *observability*.
 
 | Tool | Description |
 |------|-------------|
-| `export_manufacturing_package` | Generate ALL files needed for PCB fab + assembly in one call: Gerbers, drill, fab-house BOM, pick-and-place. Targets JLCPCB, PCBWay, etc. |
-| `validate_for_manufacturing` | Pre-flight check before ordering: verifies the design is ready for the target fab house (board outline, design rules, BOM completeness, assembly constraints). |
-| `estimate_cost` | Estimate total manufacturing cost (PCB + components + assembly) with itemized breakdown. |
+| `export_manufacturing_package` | Generate a candidate Gerber/drill bundle plus requested BOM/position outputs; any failed requested export fails the call. |
+| `validate_for_manufacturing` | Run file-level pre-flight heuristics for outline presence, footprints, minimum trace width, and an obviously completely-unrouted board. |
+| `estimate_cost` | Return a rough static cost heuristic; it does not use live fab-house or component pricing and is not a quote. |
 
 ---
 

@@ -89,7 +89,9 @@ if [ ! -f "$binary" ]; then
     exit 1
 fi
 
-staging="$(mktemp -d)/konnect-pcm-$version"
+temp_root="$(mktemp -d)"
+trap 'rm -rf "$temp_root"' EXIT
+staging="$temp_root/konnect-pcm-$version"
 mkdir -p "$staging/plugins/bin" "$staging/plugins/resources" "$staging/resources"
 
 # Plugin files
@@ -117,7 +119,8 @@ path, entry = sys.argv[1], sys.argv[2]
 m = json.load(open(path))
 for a in m.get("actions", []):
     if a.get("entrypoint", "").startswith("bin/"):
-        a["entrypoint"] = entry
+        suffix = a["entrypoint"].split(" ", 1)
+        a["entrypoint"] = entry + (" " + suffix[1] if len(suffix) == 2 else "")
 json.dump(m, open(path, "w"), indent=2)
 open(path, "a").write("\n")
 PY
@@ -143,6 +146,7 @@ v["install_size"] = int(install_size)
 # This package carries one platform's native binary — say so, or PCM offers a
 # macOS build to a Windows user and vice versa.
 v["platforms"] = [platform]
+v["runtime"] = "ipc"
 for field in ("download_sha256", "download_url", "download_size"):
     v.pop(field, None)
 json.dump(m, open(dst, "w"), indent=2)

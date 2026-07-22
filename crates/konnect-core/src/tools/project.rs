@@ -277,9 +277,9 @@ async fn handle_snapshot_project(
         let pcb = PathBuf::from(pcb_str);
         let pcb_pdf_name = format!("{}_pcb_{}_{}.pdf", stem, label, ts);
         let pcb_pdf_path = output_dir.join(&pcb_pdf_name);
-        let layers = &["F.Cu", "B.Cu", "F.Silkscreen", "B.Silkscreen", "Edge.Cuts"];
-        let _ =
-            crate::tools::cli::export_pdf(&ctx.config.kicad_cli, &pcb, &pcb_pdf_path, layers).await;
+        let layers = &["F.Cu", "B.Cu", "F.SilkS", "B.SilkS", "Edge.Cuts"];
+        crate::tools::cli::export_pdf(&ctx.config.kicad_cli, &pcb, &pcb_pdf_path, layers, false)
+            .await?;
         result["pcb_snapshot"] = json!(pcb_pdf_path.display().to_string());
     }
 

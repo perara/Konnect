@@ -11,6 +11,7 @@ Installation (KiCAD PCM):
   KiCAD loads this __init__.py automatically.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -42,7 +43,10 @@ _server_thread = None
 _POPEN_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 _CACHE_DIR = os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~/.cache")),
+    os.environ.get(
+        "LOCALAPPDATA",
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    ),
     "konnect", "cache",
 )
 _PID_FILE = os.path.join(_CACHE_DIR, "server.pid")
@@ -76,6 +80,39 @@ def _kill_tracked():
             pid = int(f.read().strip())
     except (OSError, ValueError):
         return
+    if sys.platform.startswith("linux"):
+        try:
+            running_exe = os.path.basename(os.readlink(f"/proc/{pid}/exe"))
+            if running_exe != BINARY_NAME:
+                os.remove(_PID_FILE)
+                return
+        except OSError:
+            # The process already exited, or /proc is unavailable. Never send a
+            # signal when ownership cannot be verified.
+            try:
+                os.remove(_PID_FILE)
+            except OSError:
+                pass
+            return
+    elif sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "comm="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            running_exe = os.path.basename(result.stdout.strip())
+            if result.returncode != 0 or running_exe != BINARY_NAME:
+                os.remove(_PID_FILE)
+                return
+        except OSError:
+            try:
+                os.remove(_PID_FILE)
+            except OSError:
+                pass
+            return
     try:
         if sys.platform == "win32":
             subprocess.run(
@@ -105,7 +142,17 @@ def _run_server():
     try:
         args = [_stage(BINARY_PATH)]
         if os.path.exists(SETTINGS_PATH):
-            args += ["--config", _stage(SETTINGS_PATH)]
+            settings = load_settings(SETTINGS_PATH)
+            # A server launched from an ActionPlugin has no MCP client attached
+            # to its stdio pipes. Keep a user's explicit HTTP/both choice; turn
+            # stdio into both so the background server is reachable at /mcp.
+            if settings.get("transport", "stdio") == "stdio":
+                settings["transport"] = "both"
+            os.makedirs(_CACHE_DIR, exist_ok=True)
+            runtime_settings = os.path.join(_CACHE_DIR, "runtime-settings.json")
+            with open(runtime_settings, "w") as f:
+                json.dump(settings, f, indent=2)
+            args += ["--config", runtime_settings]
         # pcbnew has no valid stderr; inheriting gives konnect a broken
         # handle and tracing_subscriber errors on init. DEVNULL is a
         # valid sink.
@@ -168,14 +215,31 @@ def is_server_running():
     return os.path.exists(_PID_FILE)
 
 
+def register_kicad_instance():
+    """Persist this KiCAD process's API socket for later MCP launches."""
+    if not os.path.exists(BINARY_PATH):
+        return
+    try:
+        subprocess.run(
+            [_stage(BINARY_PATH), "register-kicad"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            creationflags=_POPEN_FLAGS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 # ─── KiCAD Action Plugin entry point ─────────────────────────────────────────
 
 class KonnectPlugin(pcbnew.ActionPlugin):
     def defaults(self):
-        self.name = "Konnect"
+        self.name = "Konnect Settings"
         self.category = "AI Tools"
         self.description = (
-            "Configure and control the Konnect -- enables AI assistants "
+            "Configure and control Konnect -- enables AI assistants "
             "like Claude to design PCBs and schematics via the Model Context Protocol."
         )
         self.show_toolbar_button = True
@@ -183,6 +247,7 @@ class KonnectPlugin(pcbnew.ActionPlugin):
 
     def Run(self):
         """Open the settings dialog. Server start/stop is handled via dialog buttons."""
+        register_kicad_instance()
         # Get the KiCAD main window as parent for the dialog
         parent = wx.GetTopLevelWindows()[0] if wx.GetTopLevelWindows() else None
 

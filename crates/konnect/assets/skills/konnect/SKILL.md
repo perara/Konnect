@@ -76,9 +76,9 @@ Konnect uses a meta-tool router pattern with 185 tools across 18 toolsets. Tools
 
 ```
 list_toolboxes          → See all available toolsets with descriptions
-load_toolset("name")    → Activate a toolset, exposing its tools
+load_toolset(<toolset>)   → Activate a toolset, exposing its tools
 get_active_toolsets     → See what's currently loaded
-unload_toolset("name")  → Remove a toolset when done
+unload_toolset(<toolset>) → Remove a toolset when done
 ```
 
 ### Available Toolsets

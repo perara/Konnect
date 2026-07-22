@@ -6,11 +6,13 @@ name: E2E (real KiCAD)
 #   - the conformance suite round-trips every schematic in KiCAD's demo corpus
 #   - the PCM package is assembled and schema-validated
 #
-# Runs weekly, on release tags, and on demand. Not per-PR: installing KiCAD
-# costs several minutes and the per-PR suite already covers everything that
-# doesn't need a real KiCAD.
+# Runs on pull requests, weekly, on release tags, and on demand. The per-PR run
+# is intentional: Linux parity depends on real KiCAD CLI and GUI IPC behavior,
+# which cannot be proven by mock-only checks.
 
 on:
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
   workflow_dispatch:
@@ -22,6 +24,116 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  linux-e2e:
+    name: Full design loop on Ubuntu with KiCAD 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "23.4"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-kicad-linux
+
+      - name: Install KiCAD 10, standard libraries, and demos
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            kicad kicad-demos kicad-symbols kicad-footprints xauth xvfb
+          kicad-cli --version
+
+      - name: E2E design loop (create → wire → ERC → Gerber → DRC)
+        env:
+          KONNECT_E2E_KEEP_DIR: ${{ github.workspace }}/e2e-artifacts-linux
+        run: cargo test --locked -p konnect --test e2e_kicad -- --ignored --nocapture
+
+      - name: KiCad Python action-plugin smoke
+        shell: bash
+        run: |
+          cargo build --locked -p konnect
+          plugin_root="${RUNNER_TEMP}/konnect-python-plugin"
+          cache_root="${RUNNER_TEMP}/konnect-python-plugin-cache"
+          socket_root="${RUNNER_TEMP}/konnect-python-plugin-socket"
+          rm -rf "$plugin_root" "$cache_root" "$socket_root"
+          cp -R plugin "$plugin_root"
+          mkdir -p "$plugin_root/bin" "$socket_root"
+          install -m755 target/debug/konnect "$plugin_root/bin/konnect"
+          touch "$socket_root/api.sock"
+          XDG_CACHE_HOME="$cache_root" \
+          KICAD_API_SOCKET="ipc://$socket_root/api.sock" \
+          KICAD_API_TOKEN="ci-smoke-token" \
+            xvfb-run -a python3 packaging/smoke-test-kicad-python-plugin.py \
+              --plugin-dir "$plugin_root"
+
+      - name: Demo-corpus conformance
+        run: cargo test --locked -p konnect-core --test conformance_test -- --nocapture
+
+      - name: IPC Unix-socket transport regression suite
+        run: cargo test --locked -p konnect-ipc --test mock_server_test -- --ignored --nocapture
+
+      - name: Live KiCAD GUI IPC placement/move/rotate regressions
+        shell: bash
+        run: |
+          live_root="${RUNNER_TEMP}/konnect-live-kicad"
+          config_dir="$live_root/config/10.0"
+          board="$live_root/project/live_ipc.kicad_pcb"
+          socket="$live_root/tmp/kicad/api.sock"
+          mkdir -p "$config_dir" "$live_root/project" "$live_root/tmp"
+          printf '%s\n' \
+            '{"api":{"enable_server":true,"interpreter_path":"/usr/bin/python3"},"do_not_show_again":{"data_collection_prompt":true,"update_check_prompt":true}}' \
+            > "$config_dir/kicad_common.json"
+          printf '%s\n' '(fp_lib_table' '(version 7)' ')' > "$config_dir/fp-lib-table"
+          printf '%s\n' '(sym_lib_table' '(version 7)' ')' > "$config_dir/sym-lib-table"
+          printf '%s\n' '(design_block_lib_table' '(version 7)' ')' \
+            > "$config_dir/design-block-lib-table"
+          cp crates/konnect-ipc/tests/fixtures/live_ipc.kicad_pcb "$board"
+
+          setsid xvfb-run -a -s '-screen 0 1280x800x24' env \
+            GDK_BACKEND=x11 WAYLAND_DISPLAY= \
+            KICAD_CONFIG_HOME="$live_root/config" TMPDIR="$live_root/tmp" \
+            pcbnew "$board" >"$live_root/pcbnew.log" 2>&1 &
+          pcbnew_pid=$!
+          trap 'kill -- -"$pcbnew_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 30); do
+            [ -S "$socket" ] && break
+            sleep 1
+          done
+          if [ ! -S "$socket" ]; then
+            cat "$live_root/pcbnew.log"
+            echo "KiCAD IPC socket was not created" >&2
+            exit 1
+          fi
+
+          KICAD_API_SOCKET="$socket" \
+          KONNECT_LIVE_KICAD_BOARD="$board" \
+          KONNECT_LIVE_KICAD_REFERENCE=MH1 \
+            cargo test --locked -p konnect-ipc --test live_kicad_test \
+              -- --ignored --nocapture
+
+          KICAD_API_SOCKET="$socket" \
+          KONNECT_LIVE_KICAD_BOARD="$board" \
+            cargo test --locked -p konnect --test live_kicad_tools \
+              -- --ignored --nocapture
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-linux-failure-artifacts
+          path: |
+            e2e-artifacts-linux/
+            ${{ runner.temp }}/konnect-live-kicad/pcbnew.log
+          if-no-files-found: ignore
+
   e2e:
     name: Full design loop on windows-latest
     runs-on: windows-latest
@@ -33,6 +145,7 @@ jobs:
 
       - uses: arduino/setup-protoc@v3
         with:
+          version: "23.4"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Swatinem/rust-cache@v2

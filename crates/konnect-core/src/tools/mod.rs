@@ -487,8 +487,11 @@ fn kicad_config_base() -> std::path::PathBuf {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
-        std::path::PathBuf::from(home).join(".config").join("kicad")
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::config_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from(".config"));
+        base.join("kicad")
     }
 }
 
@@ -719,11 +722,24 @@ fn find_kicad_symbol_dirs() -> Vec<std::path::PathBuf> {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let candidates = ["/usr/share/kicad/symbols", "/usr/local/share/kicad/symbols"];
-        for c in &candidates {
+        let candidates = [
+            "/usr/share/kicad/symbols",
+            "/usr/local/share/kicad/symbols",
+            "/snap/kicad/current/usr/share/kicad/symbols",
+            "/var/lib/flatpak/app/org.kicad.KiCad/current/active/files/share/kicad/symbols",
+        ];
+        for c in candidates {
             let p = std::path::PathBuf::from(c);
             if p.is_dir() && !dirs.contains(&p) {
                 dirs.push(p);
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            let flatpak = home.join(
+                ".local/share/flatpak/app/org.kicad.KiCad/current/active/files/share/kicad/symbols",
+            );
+            if flatpak.is_dir() && !dirs.contains(&flatpak) {
+                dirs.push(flatpak);
             }
         }
     }

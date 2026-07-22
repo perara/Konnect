@@ -4,24 +4,28 @@ Konnect is free software, licensed under the [GNU AGPL-3.0](LICENSE).
 
 ## What that means in practice
 
-**If you're an individual** — a hobbyist, a student, a freelancer working on your own
-projects, an open-source contributor — use Konnect freely. Design boards, ship them,
-sell them. The AGPL costs you nothing.
+Individuals and organizations may use Konnect under the AGPL at no license fee,
+including for commercial PCB design. The relevant obligations depend on how the
+software is modified, combined, conveyed, or offered to remote users; they do not
+depend simply on whether the user is a hobbyist or a business.
 
-**If you're a business**, the AGPL still lets you use Konnect for free — but it comes
-with obligations that most companies can't (or won't) accept:
+In particular, distributing a covered or modified version generally requires making
+the corresponding source available under the AGPL. Section 13 also requires a
+modified version that is expressly used for remote network interaction to offer its
+corresponding source to those remote users. Merely running unmodified Konnect
+privately is a different case. See the
+[license text](https://www.gnu.org/licenses/agpl-3.0.html) and the
+[GNU license FAQ](https://www.gnu.org/licenses/gpl-faq.html#UnreleasedModsAGPL).
 
-- If you modify Konnect and distribute it — including making it available to users
-  over a network — you must release your complete modified source code under the AGPL.
-- If you build a product or internal service on top of Konnect, the AGPL's copyleft
-  can extend to that code too.
-- Your legal team will have opinions about all of the above.
+Whether another program forms a combined work with Konnect is fact-specific. This
+page is a project summary, not legal advice; consult qualified counsel for your use
+case.
 
 ## The commercial option
 
-If the AGPL doesn't work for your organization, a commercial license is available.
-It removes the copyleft obligations: use Konnect in proprietary products, internal
-tools, and hosted services without releasing your source.
+If the AGPL does not fit your intended distribution, integration, or hosted-service
+model, a commercial license is available. Its exact permissions and terms are set
+out in the commercial agreement.
 
 Contact: **nate.slidebyone.summers@gmail.com** or **chris_stockslager@comcast.net** — include a sentence or two about how you
 plan to use Konnect and the size of your team, and I'll get back to you with terms.

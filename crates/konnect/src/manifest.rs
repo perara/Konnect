@@ -19,7 +19,7 @@ pub struct AgentManifest {
 
 /// A hook-bound skill: triggers before/after specific MCP tool calls.
 /// Installed as a hook entry in `~/.claude/settings.json` that runs
-/// `konnect.exe skill <name>` to emit the content to stdout.
+/// `konnect skill <name>` to emit the content to stdout.
 pub struct HookSkillManifest {
     pub name: &'static str,
     pub content: &'static str,

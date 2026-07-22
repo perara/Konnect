@@ -154,10 +154,23 @@ fn default_jlcpcb_db_path() -> PathBuf {
         let appdata = std::env::var("APPDATA").unwrap_or_default();
         PathBuf::from(appdata).join("konnect").join("jlcpcb.db")
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_default();
         PathBuf::from(home).join(".konnect").join("jlcpcb.db")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::data_local_dir)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".local/share")
+            })
+            .join("konnect")
+            .join("jlcpcb.db")
     }
 }
 

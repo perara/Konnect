@@ -190,6 +190,92 @@ fn full_design_loop_with_real_kicad() {
         }),
     );
 
+    // Template insertion must embed library definitions, remain parseable,
+    // and report an explicit connection plan rather than claiming it wired
+    // ambiguous template pin names automatically.
+    p.load("templates");
+    let applied = body(&p.tool(
+        "apply_template",
+        json!({
+            "schematic": sch.to_string_lossy(),
+            "template_id": "led_indicator",
+            "position_x": 140.0,
+            "position_y": 100.0
+        }),
+    ));
+    assert_eq!(
+        applied["components_placed"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert!(applied["reference_map"].is_object());
+    assert!(applied["connections_to_wire"].is_array());
+    assert_eq!(
+        applied["reference_map"]["D"],
+        applied["reference_map"]["D1"]
+    );
+    assert_eq!(
+        applied["reference_map"]["R"],
+        applied["reference_map"]["R1"]
+    );
+    let placed_references: std::collections::HashSet<_> = applied["components_placed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|component| component["reference"].as_str())
+        .collect();
+    for connection in applied["connections_to_wire"].as_array().unwrap() {
+        for field in ["from", "to", "via"] {
+            let Some(endpoint) = connection[field].as_str() else {
+                continue;
+            };
+            let reference = endpoint.split('.').next().unwrap();
+            if reference.starts_with('D') || reference.starts_with('R') {
+                assert!(
+                    placed_references.contains(reference),
+                    "template endpoint was not translated to an assigned reference: {endpoint}"
+                );
+            }
+        }
+    }
+
+    // Every bundled template must resolve against the standard KiCAD 10
+    // libraries and produce a schematic that KiCAD itself can load.
+    p.load("sch_export");
+    for (index, template_id) in [
+        "usb_c_5v_sink",
+        "ldo_3v3",
+        "stm32_minimal",
+        "i2c_pullups",
+        "led_indicator",
+        "buck_converter",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let template_schematic = proj.join(format!("template-{index}.kicad_sch"));
+        p.tool(
+            "create_schematic",
+            json!({"path": template_schematic.to_string_lossy()}),
+        );
+        p.tool(
+            "apply_template",
+            json!({
+                "schematic": template_schematic.to_string_lossy(),
+                "template_id": template_id
+            }),
+        );
+        let template_erc = body(&p.tool(
+            "run_erc",
+            json!({"schematic": template_schematic.to_string_lossy()}),
+        ));
+        assert!(
+            template_erc.get("errors").is_some()
+                || template_erc.get("violations").is_some()
+                || template_erc.get("summary").is_some(),
+            "template {template_id} was not accepted by KiCAD: {template_erc}"
+        );
+    }
+
     // The written schematic must still parse and contain both parts.
     let content = std::fs::read_to_string(&sch).unwrap();
     let tree = konnect_sexp::parse_sexp(&content).expect("tool output must reparse");
@@ -198,9 +284,9 @@ fn full_design_loop_with_real_kicad() {
         .map(|s| s.reference)
         .collect();
     assert!(refs.contains(&"R1".to_string()) && refs.contains(&"C1".to_string()));
+    assert_eq!(refs.len(), 4, "template components must remain parseable");
 
     // ── ERC through real eeschema ────────────────────────────────────────
-    p.load("sch_export");
     p.load("verification");
     let erc = body(&p.tool("run_erc", json!({"schematic": sch.to_string_lossy()})));
     // A 2-part net has floating-pin warnings; what matters is that eeschema
@@ -229,6 +315,104 @@ fn full_design_loop_with_real_kicad() {
         out_dir.display()
     );
 
+    let pcb_pdf = proj.join("board.pdf");
+    p.tool(
+        "export_pdf",
+        json!({
+            "board": pcb.to_string_lossy(),
+            "output": pcb_pdf.to_string_lossy(),
+            "layers": ["F.Cu", "Edge.Cuts"],
+            "black_and_white": true
+        }),
+    );
+    assert!(pcb_pdf.is_file());
+
+    let pcb_svg = proj.join("board.svg");
+    p.tool(
+        "export_svg",
+        json!({
+            "board": pcb.to_string_lossy(),
+            "output": pcb_svg.to_string_lossy(),
+            "layers": ["F.Cu", "Edge.Cuts"]
+        }),
+    );
+    assert!(pcb_svg.is_file());
+
+    let pcb_step = proj.join("board.step");
+    p.tool(
+        "export_3d",
+        json!({
+            "board": pcb.to_string_lossy(),
+            "output": pcb_step.to_string_lossy(),
+            "format": "step",
+            "include_unspecified": false
+        }),
+    );
+    assert!(pcb_step.is_file());
+
+    let bom = proj.join("bom.csv");
+    p.tool(
+        "export_bom",
+        json!({
+            "schematic": sch.to_string_lossy(),
+            "output": bom.to_string_lossy(),
+            "exclude_dnp": true
+        }),
+    );
+    assert!(bom.is_file());
+
+    let sch_netlist = proj.join("schematic.net");
+    p.tool(
+        "export_netlist",
+        json!({
+            "board": sch.to_string_lossy(),
+            "output": sch_netlist.to_string_lossy(),
+            "format": "kicad"
+        }),
+    );
+    assert!(sch_netlist.is_file());
+
+    let ipc_netlist = proj.join("board.d356");
+    p.tool(
+        "export_netlist",
+        json!({
+            "board": pcb.to_string_lossy(),
+            "output": ipc_netlist.to_string_lossy(),
+            "format": "ipc"
+        }),
+    );
+    assert!(ipc_netlist.is_file());
+
+    let positions = proj.join("positions.csv");
+    p.tool(
+        "export_position_file",
+        json!({
+            "board": pcb.to_string_lossy(),
+            "output": positions.to_string_lossy(),
+            "format": "csv",
+            "side": "both",
+            "units": "mm"
+        }),
+    );
+    assert!(positions.is_file());
+
+    p.load("manufacturing");
+    let manufacturing_dir = proj.join("manufacturing");
+    let package = body(&p.tool(
+        "export_manufacturing_package",
+        json!({
+            "board": pcb.to_string_lossy(),
+            "schematic": sch.to_string_lossy(),
+            "output_dir": manufacturing_dir.to_string_lossy(),
+            "fab_house": "generic",
+            "include_assembly": true
+        }),
+    ));
+    assert_eq!(package["warnings"].as_array().map(Vec::len), Some(0));
+    assert!(manufacturing_dir.join("bom.csv").is_file());
+    assert!(manufacturing_dir.join("positions.csv").is_file());
+    assert!(manufacturing_dir.join("gerbers").is_dir());
+
     let drc = body(&p.tool("run_drc", json!({"board": pcb.to_string_lossy()})));
     assert!(
         drc.get("errors").is_some()
@@ -237,5 +421,8 @@ fn full_design_loop_with_real_kicad() {
         "unexpected DRC shape: {drc}"
     );
 
-    eprintln!("E2E OK: project created, wired, ERC'd, {produced} gerber files, DRC'd");
+    eprintln!(
+        "E2E OK: project/templates created, wired, ERC'd, {produced} Gerbers, \
+         PDF/SVG/STEP/BOM/netlists/positions/manufacturing package exported, DRC'd"
+    );
 }

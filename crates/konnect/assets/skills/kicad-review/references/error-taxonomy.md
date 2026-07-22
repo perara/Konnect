@@ -15,7 +15,7 @@
 
 | Error | Meaning | Fix |
 |-------|---------|-----|
-| Unconnected pin | Pin without connection or no-connect marker | Add `no_connect` if intentional, wire if not |
+| Unconnected pin | Pin without connection or no-connect marker | Use `add_no_connect` if intentional, wire if not |
 | Pin not driven | Input pin without a driver on its net | Verify net has an output pin somewhere |
 | Bidirectional pin conflict | Multiple bidirectional pins contending | Usually OK for buses, verify if intentional |
 | Power pin not driven | Power input without a power flag | Add `PWR_FLAG` symbol to the net |

@@ -148,7 +148,8 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "check_clearance",
-            "Check the physical clearance (distance) between two components on the PCB.",
+            "Measure the straight-line distance between two footprints' placement origins. \
+             This is not courtyard/body/copper edge-to-edge clearance.",
             json!({
                 "type": "object",
                 "properties": {
@@ -840,7 +841,8 @@ async fn handle_check_clearance(
         "ref2": ref2,
         "pos1": { "x": pos1.0, "y": pos1.1 },
         "pos2": { "x": pos2.0, "y": pos2.1 },
-        "distance_mm": (distance * 1000.0).round() / 1000.0
+        "center_distance_mm": (distance * 1000.0).round() / 1000.0,
+        "note": "Placement-origin distance only; inspect courtyards/body/copper geometry for physical clearance."
     })))
 }
 

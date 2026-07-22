@@ -23,18 +23,12 @@ pub fn tools() -> Vec<ToolDef> {
     vec![
         tool!(
             "audit_decoupling",
-            "Check that all ICs have appropriate decoupling capacitors. Finds power pins \
-             without nearby capacitors and flags wrong values. The #1 most common PCB design mistake.",
+            "Use schematic connectivity heuristics to flag IC power nets that have no capacitor. \
+             This does not verify capacitor value or physical PCB distance.",
             json!({
                 "type": "object",
                 "properties": {
-                    "schematic": { "type": "string", "description": "Path to .kicad_sch file" },
-                    "board": { "type": "string", "description": "Path to .kicad_pcb file (optional, for distance check)" },
-                    "max_distance_mm": {
-                        "type": "number",
-                        "description": "Max allowed distance from power pin to decoupling cap on PCB (mm)",
-                        "default": 5.0
-                    }
+                    "schematic": { "type": "string", "description": "Path to .kicad_sch file" }
                 },
                 "required": ["schematic"]
             }),
@@ -68,8 +62,8 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "audit_manufacturing",
-            "DFM checks for the configured fab house: component spacing, silkscreen overlap, \
-             via-in-pad, acid traps, board outline issues.",
+            "Run file-level DFM heuristics for board-outline presence, silkscreen overlap, \
+             minimum trace width, and component-side information.",
             json!({
                 "type": "object",
                 "properties": {
@@ -86,8 +80,8 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "run_design_review",
-            "Run all available audit checks and produce a consolidated design review report. \
-             This is the tool to call when the user asks 'is my board ready?' or 'review my design'.",
+            "Run the heuristic decoupling, connection, power-rail, BOM-field, and optional \
+             file-level DFM audits and return one report. Run formal ERC and DRC separately.",
             json!({
                 "type": "object",
                 "properties": {
@@ -105,8 +99,8 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "check_bom_health",
-            "Analyze the BOM for supply chain risks: parts with no MPN, lifecycle warnings, \
-             low stock, parts not available from preferred distributors.",
+            "Check schematic symbols for missing value, footprint, manufacturer part number, \
+             and LCSC fields. This does not query live lifecycle, stock, or distributor data.",
             json!({
                 "type": "object",
                 "properties": {

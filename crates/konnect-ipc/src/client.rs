@@ -62,6 +62,7 @@ fn unpack_any<M: Message + Default>(any: &prost_types::Any) -> Result<M> {
 
 pub struct KiCadIpcClient {
     socket_path: String,
+    kicad_token: String,
     client_name: String,
 }
 
@@ -77,8 +78,20 @@ impl KiCadIpcClient {
         };
         KiCadIpcClient {
             socket_path: effective_path,
+            kicad_token: std::env::var("KICAD_API_TOKEN").unwrap_or_default(),
             client_name: format!("konnect-{}", std::process::id()),
         }
+    }
+
+    /// Create a client with an explicit API token.
+    ///
+    /// KiCAD supplies this token to executable plugins through
+    /// `KICAD_API_TOKEN`. This constructor is useful for clients that obtain
+    /// the connection details through another discovery mechanism.
+    pub fn new_with_token(socket_path: impl Into<String>, token: impl Into<String>) -> Self {
+        let mut client = Self::new(socket_path);
+        client.kicad_token = token.into();
+        client
     }
 
     /// Send a protobuf command and return the response Any.
@@ -97,13 +110,13 @@ impl KiCadIpcClient {
                  (3) restart the AI client so the server rereads settings. \
                  Alternatively set ipc_socket_path in konnect-settings.json or launch \
                  via KiCAD (which sets KICAD_API_SOCKET). \
-                 Full guide: https://github.com/mixelpixx/Konnect/blob/main/docs/TROUBLESHOOTING.md"
+                 Full guide: https://github.com/perara/Konnect/blob/main/docs/TROUBLESHOOTING.md"
             );
         }
 
         let request = kiapi::common::ApiRequest {
             header: Some(kiapi::common::ApiRequestHeader {
-                kicad_token: String::new(), // Empty = accept any instance
+                kicad_token: self.kicad_token.clone(),
                 client_name: self.client_name.clone(),
             }),
             message: Some(pack_any(command, type_name)),
@@ -318,7 +331,21 @@ impl KiCadIpcClient {
             items,
             container: None,
         };
-        self.send_command(&cmd, "kiapi.common.commands.CreateItems")?;
+        if let Some(any) = self.send_command(&cmd, "kiapi.common.commands.CreateItems")? {
+            let response: kiapi::common::commands::CreateItemsResponse = unpack_any(&any)?;
+            for result in response.created_items {
+                let status = result
+                    .status
+                    .context("KiCAD returned a creation result without item status")?;
+                if status.code() != kiapi::common::commands::ItemStatusCode::IscOk {
+                    anyhow::bail!(
+                        "KiCAD item creation failed: {} ({})",
+                        status.error_message,
+                        status.code().as_str_name()
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -330,7 +357,21 @@ impl KiCadIpcClient {
             header: Some(header),
             items,
         };
-        self.send_command(&cmd, "kiapi.common.commands.UpdateItems")?;
+        if let Some(any) = self.send_command(&cmd, "kiapi.common.commands.UpdateItems")? {
+            let response: kiapi::common::commands::UpdateItemsResponse = unpack_any(&any)?;
+            for result in response.updated_items {
+                let Some(status) = result.status else {
+                    anyhow::bail!("KiCAD returned an update result without item status");
+                };
+                if status.code() != kiapi::common::commands::ItemStatusCode::IscOk {
+                    anyhow::bail!(
+                        "KiCAD item update failed: {} ({})",
+                        status.error_message,
+                        status.code().as_str_name()
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -582,13 +623,7 @@ impl KiCadIpcClient {
                         },
                     )?;
                     let any = crate::builders::pack_any(&fp, "kiapi.board.types.FootprintInstance");
-
-                    let header = self.make_header()?;
-                    let cmd = kiapi::common::commands::UpdateItems {
-                        header: Some(header),
-                        items: vec![any],
-                    };
-                    self.send_command(&cmd, "kiapi.common.commands.UpdateItems")?;
+                    self.update_items(vec![any])?;
                     return Ok(());
                 }
             }
@@ -632,17 +667,57 @@ impl KiCadIpcClient {
                         },
                     )?;
                     let any = crate::builders::pack_any(&fp, "kiapi.board.types.FootprintInstance");
-                    let header = self.make_header()?;
-                    let cmd = kiapi::common::commands::UpdateItems {
-                        header: Some(header),
-                        items: vec![any],
-                    };
-                    self.send_command(&cmd, "kiapi.common.commands.UpdateItems")?;
+                    self.update_items(vec![any])?;
                     return Ok(());
                 }
             }
         }
         anyhow::bail!("Footprint '{}' not found", reference)
+    }
+
+    /// Update the visible value field of an existing footprint.
+    pub fn set_footprint_value(&self, reference: &str, value: &str) -> Result<()> {
+        let items = self.get_items(kiapi::common::types::KiCadObjectType::KotPcbFootprint)?;
+        for item in items {
+            if let Ok(mut footprint) =
+                kiapi::board::types::FootprintInstance::decode(item.value.as_slice())
+            {
+                let current_reference = footprint
+                    .reference_field
+                    .as_ref()
+                    .and_then(|field| field.text.as_ref())
+                    .and_then(|board_text| board_text.text.as_ref())
+                    .map(|text| text.text.as_str())
+                    .unwrap_or("");
+                if current_reference != reference {
+                    continue;
+                }
+                if let Some(text) = footprint
+                    .value_field
+                    .as_mut()
+                    .and_then(|field| field.text.as_mut())
+                    .and_then(|board_text| board_text.text.as_mut())
+                {
+                    text.text = value.to_string();
+                } else {
+                    anyhow::bail!("Footprint '{reference}' has no editable value field");
+                }
+                if let Some(text) = footprint
+                    .definition
+                    .as_mut()
+                    .and_then(|definition| definition.value_field.as_mut())
+                    .and_then(|field| field.text.as_mut())
+                    .and_then(|board_text| board_text.text.as_mut())
+                {
+                    text.text = value.to_string();
+                }
+                let any =
+                    crate::builders::pack_any(&footprint, "kiapi.board.types.FootprintInstance");
+                self.update_items(vec![any])?;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Footprint '{reference}' not found")
     }
 
     /// Delete a footprint by reference.
@@ -651,46 +726,190 @@ impl KiCadIpcClient {
         self.delete_items(vec![kiid])
     }
 
-    /// Place a footprint — currently requires KiCAD's ParseAndCreateItemsFromString.
+    /// Place a footprint instance through the typed KiCAD CreateItems API.
+    #[allow(clippy::too_many_arguments)]
     pub fn place_footprint(
         &self,
         lib_id: &str,
+        reference: &str,
+        value: &str,
+        pads: &[IpcPadDefinition],
         x: f64,
         y: f64,
         rotation: f64,
         layer: &str,
     ) -> Result<IpcFootprint> {
-        // KiCAD 10 IPC doesn't have a direct "place footprint from library" command.
-        // The CreateItems command requires a fully formed FootprintInstance protobuf,
-        // which needs the complete footprint definition (pads, shapes, etc.) from the library.
-        // For now, use ParseAndCreateItemsFromString with S-expression format.
-        let sexp = format!(
-            r#"(footprint "{lib_id}"
-  (layer "{layer}")
-  (at {x} {y} {rotation})
-)"#,
-            lib_id = lib_id,
-            layer = layer,
-            x = crate::builders::mm_to_nm(x) as f64 / 1_000_000.0,
-            y = crate::builders::mm_to_nm(y) as f64 / 1_000_000.0,
-            rotation = rotation,
-        );
+        let (library_nickname, entry_name) = lib_id
+            .split_once(':')
+            .context("footprint identifier must use Library:Footprint syntax")?;
+        let text_field =
+            |name: &str, text: &str, field_y: f64, visible: bool| kiapi::board::types::Field {
+                id: None,
+                name: name.to_string(),
+                text: Some(kiapi::board::types::BoardText {
+                    id: None,
+                    text: Some(kiapi::common::types::Text {
+                        position: Some(crate::builders::vec2(x, field_y)),
+                        attributes: Some(kiapi::common::types::TextAttributes {
+                            size: Some(crate::builders::vec2(1.0, 1.0)),
+                            angle: Some(kiapi::common::types::Angle {
+                                value_degrees: rotation,
+                            }),
+                            ..Default::default()
+                        }),
+                        text: text.to_string(),
+                        hyperlink: String::new(),
+                    }),
+                    layer: crate::builders::layer_from_name(if layer == "B.Cu" {
+                        "B.SilkS"
+                    } else {
+                        "F.SilkS"
+                    }) as i32,
+                    knockout: false,
+                    locked: kiapi::common::types::LockedState::LsUnlocked as i32,
+                }),
+                visible,
+            };
+        let reference_field = text_field("Reference", reference, y - 1.0, true);
+        let value_field = text_field("Value", value, y + 1.0, false);
+        let radians = rotation.to_radians();
+        let child_items = pads
+            .iter()
+            .map(|pad| {
+                let local_x = pad.x;
+                let local_y = pad.y;
+                let board_x = x + local_x * radians.cos() + local_y * radians.sin();
+                let board_y = y - local_x * radians.sin() + local_y * radians.cos();
+                let mut layers = Vec::new();
+                for name in &pad.layers {
+                    match name.as_str() {
+                        "*.Cu" => layers.extend(3..=34),
+                        "*.Mask" => layers.extend([
+                            kiapi::board::types::BoardLayer::BlFMask as i32,
+                            kiapi::board::types::BoardLayer::BlBMask as i32,
+                        ]),
+                        "*.Paste" => layers.extend([
+                            kiapi::board::types::BoardLayer::BlFPaste as i32,
+                            kiapi::board::types::BoardLayer::BlBPaste as i32,
+                        ]),
+                        name => layers.push(crate::builders::layer_from_name(name) as i32),
+                    }
+                }
+                layers
+                    .retain(|layer| *layer != kiapi::board::types::BoardLayer::BlUndefined as i32);
+                layers.sort_unstable();
+                layers.dedup();
 
-        let doc = self.get_board_document()?;
-        let cmd = kiapi::common::commands::ParseAndCreateItemsFromString {
-            document: Some(doc),
-            contents: sexp,
+                let shape = match pad.shape.as_str() {
+                    "circle" => kiapi::board::types::PadStackShape::PssCircle,
+                    "rect" => kiapi::board::types::PadStackShape::PssRectangle,
+                    "oval" => kiapi::board::types::PadStackShape::PssOval,
+                    "trapezoid" => kiapi::board::types::PadStackShape::PssTrapezoid,
+                    "roundrect" => kiapi::board::types::PadStackShape::PssRoundrect,
+                    "chamfered_rect" => kiapi::board::types::PadStackShape::PssChamferedrect,
+                    _ => kiapi::board::types::PadStackShape::PssRectangle,
+                };
+                let copper_layer =
+                    if layers.contains(&(kiapi::board::types::BoardLayer::BlFCu as i32)) {
+                        kiapi::board::types::BoardLayer::BlFCu
+                    } else {
+                        kiapi::board::types::BoardLayer::BlBCu
+                    };
+                let copper = kiapi::board::types::PadStackLayer {
+                    layer: copper_layer as i32,
+                    shape: shape as i32,
+                    size: Some(crate::builders::vec2(pad.size_x, pad.size_y)),
+                    corner_rounding_ratio: pad.roundrect_ratio,
+                    custom_anchor_shape: shape as i32,
+                    offset: Some(crate::builders::vec2(0.0, 0.0)),
+                    ..Default::default()
+                };
+                let drill = pad
+                    .drill_x
+                    .map(|drill_x| kiapi::board::types::DrillProperties {
+                        start_layer: kiapi::board::types::BoardLayer::BlFCu as i32,
+                        end_layer: kiapi::board::types::BoardLayer::BlBCu as i32,
+                        diameter: Some(crate::builders::vec2(
+                            drill_x,
+                            pad.drill_y.unwrap_or(drill_x),
+                        )),
+                        shape: if pad.drill_oval {
+                            kiapi::board::types::DrillShape::DsOblong as i32
+                        } else {
+                            kiapi::board::types::DrillShape::DsCircle as i32
+                        },
+                        ..Default::default()
+                    });
+                let stack = kiapi::board::types::PadStack {
+                    r#type: kiapi::board::types::PadStackType::PstNormal as i32,
+                    layers,
+                    drill,
+                    unconnected_layer_removal: kiapi::board::types::UnconnectedLayerRemoval::UlrKeep
+                        as i32,
+                    copper_layers: vec![copper],
+                    angle: Some(kiapi::common::types::Angle {
+                        value_degrees: rotation + pad.rotation,
+                    }),
+                    ..Default::default()
+                };
+                let pad_type = match pad.pad_type.as_str() {
+                    "thru_hole" => kiapi::board::types::PadType::PtPth,
+                    "np_thru_hole" => kiapi::board::types::PadType::PtNpth,
+                    "connect" => kiapi::board::types::PadType::PtEdgeConnector,
+                    _ => kiapi::board::types::PadType::PtSmd,
+                };
+                let item = kiapi::board::types::Pad {
+                    number: pad.number.clone(),
+                    r#type: pad_type as i32,
+                    pad_stack: Some(stack),
+                    position: Some(crate::builders::vec2(board_x, board_y)),
+                    locked: kiapi::common::types::LockedState::LsUnlocked as i32,
+                    ..Default::default()
+                };
+                crate::builders::pack_any(&item, "kiapi.board.types.Pad")
+            })
+            .collect();
+        let definition = kiapi::board::types::Footprint {
+            id: Some(kiapi::common::types::LibraryIdentifier {
+                library_nickname: library_nickname.to_string(),
+                entry_name: entry_name.to_string(),
+            }),
+            reference_field: Some(reference_field.clone()),
+            value_field: Some(value_field.clone()),
+            items: child_items,
+            ..Default::default()
         };
-        self.send_command(&cmd, "kiapi.common.commands.ParseAndCreateItemsFromString")?;
-
-        Ok(IpcFootprint {
-            reference: String::new(),
-            value: String::new(),
-            footprint: lib_id.to_string(),
-            position: IpcVector2 { x, y },
-            rotation,
-            layer: layer.to_string(),
-        })
+        let footprint = kiapi::board::types::FootprintInstance {
+            position: Some(crate::builders::vec2(x, y)),
+            orientation: Some(kiapi::common::types::Angle {
+                value_degrees: rotation,
+            }),
+            layer: crate::builders::layer_from_name(layer) as i32,
+            locked: kiapi::common::types::LockedState::LsUnlocked as i32,
+            definition: Some(definition),
+            reference_field: Some(reference_field),
+            value_field: Some(value_field),
+            ..Default::default()
+        };
+        self.create_items(vec![crate::builders::pack_any(
+            &footprint,
+            "kiapi.board.types.FootprintInstance",
+        )])?;
+        let footprints = self.list_footprints()?;
+        footprints
+            .iter()
+            .find(|footprint| footprint.reference == reference)
+            .cloned()
+            .with_context(|| {
+                let references = footprints
+                    .iter()
+                    .map(|footprint| footprint.reference.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "KiCAD created the footprint but reference '{reference}' was not found (board references: {references})"
+                )
+            })
     }
 
     /// Get board extents (bounding box of all items).
