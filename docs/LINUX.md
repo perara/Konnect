@@ -172,6 +172,22 @@ Linux user files follow the XDG base-directory convention:
 | Call logs | `~/.local/state/konnect/` |
 | KiCAD IPC discovery and plugin runtime files | `~/.cache/konnect/` |
 
+### JLCPCB parts catalog
+
+Load the `integration` toolset and call `download_jlcpcb_database` to download a
+local catalog. The default `current` catalog excludes parts that have been out of
+stock for more than a year and is the recommended balance of coverage and disk
+size. `catalog = "basic"` downloads only Basic and Preferred parts, while
+`catalog = "all"` downloads the much larger historical catalog. Use `force = true`
+to refresh an existing cache.
+
+On Linux the converted database is stored at
+`~/.local/share/konnect/jlcpcb.db` unless `output_path` or `jlcpcb_db_path` is
+configured. Konnect downloads the maintained chunked catalog, validates the ZIP,
+converts its current schema, and replaces the previous database only after the
+new cache is complete. Catalog stock and pricing are snapshots; verify both in
+JLCPCB's order portal before placing an order.
+
 When KiCAD launches the PCM executable plugin it supplies `KICAD_API_SOCKET` and an
 optional API token. Click **Tools → External Plugins → Konnect** in the PCB Editor
 whose board you want to control. Konnect stores that instance's socket/token in a

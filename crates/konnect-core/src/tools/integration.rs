@@ -17,8 +17,11 @@
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, require_str, ToolContext, ToolDef};
+use anyhow::{bail, Context};
 use serde_json::json;
+use std::io::Write;
 use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
@@ -31,7 +34,13 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "output_path": { "type": "string", "description": "Local path to store the SQLite database file (optional, uses config default)" },
-                    "force": { "type": "boolean", "description": "Force re-download even if cache exists", "default": false }
+                    "force": { "type": "boolean", "description": "Force re-download even if cache exists", "default": false },
+                    "catalog": {
+                        "type": "string",
+                        "enum": ["current", "basic", "all"],
+                        "description": "Catalog size: current excludes long-obsolete parts (recommended), basic contains Basic + Preferred parts, all contains the full historical catalog",
+                        "default": "current"
+                    }
                 },
                 "required": []
             }),
@@ -184,6 +193,47 @@ fn resolve_db_path(args: &serde_json::Value, ctx: &ToolContext) -> PathBuf {
     default_jlcpcb_db_path()
 }
 
+const JLCPCB_CATALOG_BASE_URL: &str = "https://bouni.github.io/kicad-jlcpcb-tools";
+const MAX_CATALOG_CHUNKS: usize = 100;
+
+#[derive(Clone, Copy, Debug)]
+struct CatalogSpec {
+    name: &'static str,
+    database_filename: &'static str,
+    chunk_count_filename: &'static str,
+}
+
+fn catalog_spec(name: &str) -> Option<CatalogSpec> {
+    match name {
+        "current" => Some(CatalogSpec {
+            name: "current",
+            database_filename: "current-parts-fts5.db",
+            chunk_count_filename: "chunk_num_current_parts_fts5.txt",
+        }),
+        "basic" => Some(CatalogSpec {
+            name: "basic",
+            database_filename: "basic-parts-fts5.db",
+            chunk_count_filename: "chunk_num_basic_parts_fts5.txt",
+        }),
+        "all" => Some(CatalogSpec {
+            name: "all",
+            database_filename: "parts-fts5.db",
+            chunk_count_filename: "chunk_num_fts5.txt",
+        }),
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+struct CatalogConversionStats {
+    part_count: u64,
+    basic_count: u64,
+    source_date: String,
+    source_last_updated: String,
+}
+
+type CatalogMetadata = (String, String, String);
+
 // ─── Retry/backoff for external HTTP calls ────────────────────────────────────
 //
 // JLCPCB database download and LCSC datasheet lookups are the only genuinely
@@ -248,6 +298,268 @@ async fn get_with_backoff(
     }
 }
 
+async fn download_catalog_archive(
+    client: &reqwest::Client,
+    base_url: &str,
+    spec: CatalogSpec,
+    archive_path: &std::path::Path,
+) -> anyhow::Result<(usize, u64)> {
+    let base_url = base_url.trim_end_matches('/');
+    let count_url = format!("{base_url}/{}", spec.chunk_count_filename);
+    let count_response = get_with_backoff(client, &count_url).await?;
+    if !count_response.status().is_success() {
+        bail!(
+            "catalog chunk manifest download failed: HTTP {} ({count_url})",
+            count_response.status()
+        );
+    }
+    let chunk_count: usize = count_response
+        .text()
+        .await?
+        .trim()
+        .parse()
+        .context("catalog chunk manifest did not contain an integer")?;
+    if !(1..=MAX_CATALOG_CHUNKS).contains(&chunk_count) {
+        bail!("catalog chunk count {chunk_count} is outside the supported range");
+    }
+
+    let mut archive = tokio::fs::File::create(archive_path).await?;
+    let mut downloaded_bytes = 0u64;
+    for index in 1..=chunk_count {
+        let chunk_filename = format!("{}.zip.{index:03}", spec.database_filename);
+        let chunk_url = format!("{base_url}/{chunk_filename}");
+        let mut response = get_with_backoff(client, &chunk_url).await?;
+        if !response.status().is_success() {
+            bail!(
+                "catalog chunk {index}/{chunk_count} download failed: HTTP {} ({chunk_url})",
+                response.status()
+            );
+        }
+        while let Some(bytes) = response.chunk().await? {
+            archive.write_all(&bytes).await?;
+            downloaded_bytes += bytes.len() as u64;
+        }
+    }
+    archive.flush().await?;
+    archive.sync_all().await?;
+    Ok((chunk_count, downloaded_bytes))
+}
+
+fn extract_catalog_database(
+    archive_path: &std::path::Path,
+    database_filename: &str,
+    extracted_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let file = std::fs::File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file).context("catalog download is not a valid ZIP")?;
+    let mut database = archive
+        .by_name(database_filename)
+        .with_context(|| format!("catalog ZIP does not contain {database_filename}"))?;
+    if database.is_dir() {
+        bail!("catalog ZIP entry {database_filename} is a directory");
+    }
+    let mut output = std::fs::File::create(extracted_path)?;
+    std::io::copy(&mut database, &mut output)?;
+    output.flush()?;
+    output.sync_all()?;
+    Ok(())
+}
+
+fn sqlite_value_as_string(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+    use rusqlite::types::ValueRef;
+    Ok(match row.get_ref(index)? {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(value) => value.to_string(),
+        ValueRef::Real(value) => value.to_string(),
+        ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned(),
+        ValueRef::Blob(_) => String::new(),
+    })
+}
+
+fn first_tier_price(raw: &str) -> f64 {
+    raw.split(',')
+        .next()
+        .and_then(|tier| tier.split_once(':').map(|(_, price)| price).or(Some(tier)))
+        .and_then(|price| price.trim().parse::<f64>().ok())
+        .filter(|price| price.is_finite() && *price >= 0.0)
+        .unwrap_or(0.0)
+}
+
+fn contains_numeric_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    haystack.match_indices(&needle).any(|(start, matched)| {
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[start + matched.len()..].chars().next();
+        !before.is_some_and(|character| character.is_ascii_digit() || character == '.')
+            && !after.is_some_and(|character| character.is_ascii_digit() || character == '.')
+    })
+}
+
+fn convert_catalog_database(
+    source_path: &std::path::Path,
+    target_path: &std::path::Path,
+    spec: CatalogSpec,
+    source_url: &str,
+) -> anyhow::Result<CatalogConversionStats> {
+    let source = rusqlite::Connection::open_with_flags(
+        source_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let (source_part_count, source_date, source_last_updated) = source
+        .query_row(
+            "SELECT partcount, date, last_update FROM meta LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    sqlite_value_as_string(row, 0)?,
+                    sqlite_value_as_string(row, 1)?,
+                    sqlite_value_as_string(row, 2)?,
+                ))
+            },
+        )
+        .context("catalog metadata is missing or incompatible")?;
+
+    let mut target = rusqlite::Connection::open(target_path)?;
+    target.execute_batch(
+        "PRAGMA journal_mode = OFF;
+         PRAGMA synchronous = OFF;
+         CREATE TABLE components (
+             LCSC TEXT PRIMARY KEY,
+             Category TEXT NOT NULL,
+             MFR_Part TEXT NOT NULL,
+             Package TEXT NOT NULL,
+             Solder_Joint INTEGER NOT NULL,
+             Manufacturer TEXT NOT NULL,
+             Library_Type TEXT NOT NULL,
+             Description TEXT NOT NULL,
+             Datasheet TEXT NOT NULL,
+             Price REAL NOT NULL,
+             Stock INTEGER NOT NULL
+         );
+         CREATE TABLE catalog_metadata (
+             catalog TEXT NOT NULL,
+             source_url TEXT NOT NULL,
+             source_date TEXT NOT NULL,
+             source_last_updated TEXT NOT NULL,
+             source_part_count INTEGER NOT NULL
+         );",
+    )?;
+
+    let mut select = source.prepare(
+        "SELECT \"LCSC Part\", \"First Category\", \"Second Category\", \
+                \"MFR.Part\", Package, \"Solder Joint\", Manufacturer, \
+                \"Library Type\", Description, Datasheet, Price, Stock \
+         FROM parts",
+    )?;
+    let mut rows = select.query([])?;
+    let transaction = target.transaction()?;
+    let mut insert = transaction.prepare(
+        "INSERT INTO components (
+             LCSC, Category, MFR_Part, Package, Solder_Joint, Manufacturer,
+             Library_Type, Description, Datasheet, Price, Stock
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
+    let mut part_count = 0u64;
+    let mut basic_count = 0u64;
+    while let Some(row) = rows.next()? {
+        let lcsc = sqlite_value_as_string(row, 0)?;
+        let first_category = sqlite_value_as_string(row, 1)?;
+        let second_category = sqlite_value_as_string(row, 2)?;
+        let mfr_part = sqlite_value_as_string(row, 3)?;
+        let package = sqlite_value_as_string(row, 4)?;
+        let solder_joint = sqlite_value_as_string(row, 5)?.parse::<i64>().unwrap_or(0);
+        let manufacturer = sqlite_value_as_string(row, 6)?;
+        let library_type = sqlite_value_as_string(row, 7)?;
+        let description = sqlite_value_as_string(row, 8)?;
+        let datasheet = sqlite_value_as_string(row, 9)?;
+        let price = first_tier_price(&sqlite_value_as_string(row, 10)?);
+        let stock = sqlite_value_as_string(row, 11)?.parse::<i64>().unwrap_or(0);
+        let category = match (first_category.is_empty(), second_category.is_empty()) {
+            (false, false) => format!("{first_category} / {second_category}"),
+            (false, true) => first_category,
+            (true, false) => second_category,
+            (true, true) => String::new(),
+        };
+        insert.execute(rusqlite::params![
+            lcsc,
+            category,
+            mfr_part,
+            package,
+            solder_joint,
+            manufacturer,
+            library_type,
+            description,
+            datasheet,
+            price,
+            stock,
+        ])?;
+        part_count += 1;
+        if library_type == "Basic" {
+            basic_count += 1;
+        }
+    }
+    drop(insert);
+    transaction.commit()?;
+
+    target.execute_batch(
+        "CREATE INDEX idx_components_library_stock ON components(Library_Type, Stock);",
+    )?;
+    target.execute(
+        "INSERT INTO catalog_metadata VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            spec.name,
+            source_url,
+            source_date,
+            source_last_updated,
+            source_part_count
+                .parse::<i64>()
+                .unwrap_or(part_count as i64),
+        ],
+    )?;
+    target.execute_batch(
+        "PRAGMA optimize;
+         PRAGMA journal_mode = DELETE;
+         PRAGMA synchronous = NORMAL;",
+    )?;
+
+    Ok(CatalogConversionStats {
+        part_count,
+        basic_count,
+        source_date,
+        source_last_updated,
+    })
+}
+
+fn replace_database_atomically(
+    replacement: &std::path::Path,
+    destination: &std::path::Path,
+    backup: &std::path::Path,
+) -> anyhow::Result<()> {
+    if destination.exists() {
+        std::fs::rename(destination, backup).with_context(|| {
+            format!(
+                "could not move existing database {} aside",
+                destination.display()
+            )
+        })?;
+    }
+    if let Err(error) = std::fs::rename(replacement, destination) {
+        if backup.exists() {
+            let _ = std::fs::rename(backup, destination);
+        }
+        return Err(error)
+            .with_context(|| format!("could not install database at {}", destination.display()));
+    }
+    if backup.exists() {
+        std::fs::remove_file(backup)?;
+    }
+    Ok(())
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 async fn handle_download_jlcpcb(
@@ -256,6 +568,12 @@ async fn handle_download_jlcpcb(
 ) -> anyhow::Result<CallToolResult> {
     let db_path = resolve_db_path(args, ctx);
     let force = args["force"].as_bool().unwrap_or(false);
+    let catalog_name = args["catalog"].as_str().unwrap_or("current");
+    let Some(spec) = catalog_spec(catalog_name) else {
+        return Ok(CallToolResult::error(format!(
+            "Unknown JLCPCB catalog '{catalog_name}'; expected current, basic, or all"
+        )));
+    };
 
     if db_path.exists() && !force {
         let meta = tokio::fs::metadata(&db_path).await?;
@@ -270,33 +588,51 @@ async fn handle_download_jlcpcb(
         ));
     }
 
-    // JLCPCB parts database is distributed as a CSV or SQLite download.
-    // The official URL changes — we use a known community mirror format.
-    let url = "https://bouni.github.io/kicad-jlcpcb-tools/jlcpcb_parts.db";
-
-    if let Some(parent) = db_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    let parent = db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    tokio::fs::create_dir_all(parent).await?;
+    let workspace = tempfile::Builder::new()
+        .prefix(".konnect-jlcpcb-")
+        .tempdir_in(parent)?;
+    let archive_path = workspace.path().join("catalog.zip");
+    let extracted_path = workspace.path().join(spec.database_filename);
+    let converted_path = workspace.path().join("converted.db");
+    let backup_path = workspace.path().join("previous.db");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
-
-    let resp = get_with_backoff(&client, url).await?;
-    if !resp.status().is_success() {
-        return Ok(CallToolResult::error(format!(
-            "Download failed: HTTP {}",
-            resp.status()
-        )));
-    }
-    let bytes = resp.bytes().await?;
-    tokio::fs::write(&db_path, &bytes).await?;
+    let (chunk_count, downloaded_bytes) =
+        download_catalog_archive(&client, JLCPCB_CATALOG_BASE_URL, spec, &archive_path).await?;
+    let source_url = format!("{JLCPCB_CATALOG_BASE_URL}/{}", spec.chunk_count_filename);
+    let conversion = tokio::task::spawn_blocking({
+        let archive_path = archive_path.clone();
+        let extracted_path = extracted_path.clone();
+        let converted_path = converted_path.clone();
+        move || -> anyhow::Result<CatalogConversionStats> {
+            extract_catalog_database(&archive_path, spec.database_filename, &extracted_path)?;
+            convert_catalog_database(&extracted_path, &converted_path, spec, &source_url)
+        }
+    })
+    .await??;
+    replace_database_atomically(&converted_path, &db_path, &backup_path)?;
+    ctx.jlcpcb_cache.clear();
+    let installed_size = tokio::fs::metadata(&db_path).await?.len();
 
     Ok(CallToolResult::text(
         serde_json::to_string_pretty(&json!({
             "success": true,
+            "catalog": spec.name,
             "path": db_path.to_str().unwrap_or(""),
-            "size_bytes": bytes.len()
+            "part_count": conversion.part_count,
+            "basic_part_count": conversion.basic_count,
+            "catalog_date": conversion.source_date,
+            "catalog_last_updated": conversion.source_last_updated,
+            "chunk_count": chunk_count,
+            "download_size_bytes": downloaded_bytes,
+            "size_bytes": installed_size
         }))
         .unwrap(),
     ))
@@ -323,7 +659,7 @@ async fn handle_search_jlcpcb_parts(
     let query = args["query"].as_str().unwrap_or("").to_string();
     let basic_only = args["basic_only"].as_bool().unwrap_or(false);
     let in_stock = args["in_stock"].as_bool().unwrap_or(true);
-    let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(20).min(1000) as usize;
     let category = args["category"].as_str().map(String::from);
 
     let key = cache_key(
@@ -472,7 +808,7 @@ async fn handle_suggest_alternatives(
     let value = args["value"].as_str().unwrap_or("").to_string();
     let footprint = args["footprint"].as_str().unwrap_or("").to_string();
     let max_price = args["max_price_usd"].as_f64();
-    let limit = args["limit"].as_u64().unwrap_or(5) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(5).min(1000) as usize;
 
     // Extract package from footprint (e.g. "Resistor_SMD:R_0402" → "0402")
     let package_hint = footprint
@@ -507,20 +843,30 @@ async fn handle_suggest_alternatives(
         let like_val = format!("%{}%", value);
         let like_pkg = format!("%{}%", package_hint);
 
+        let candidate_limit = limit.saturating_mul(50).clamp(limit, 5000);
         let mut sql = String::from(
             "SELECT LCSC, MFR_Part, Package, Manufacturer, Library_Type, Description, Price, Stock \
              FROM components WHERE Description LIKE ?1 AND Package LIKE ?2 AND Stock > 0"
         );
         if let Some(max_p) = max_price {
-            sql.push_str(&format!(" AND Price <= {}", max_p));
+            sql.push_str(&format!(" AND Price > 0 AND Price <= {}", max_p));
         }
-        sql.push_str(&format!(" ORDER BY Price ASC LIMIT {}", limit));
+        sql.push_str(&format!(
+            " ORDER BY CASE WHEN Price > 0 THEN 0 ELSE 1 END, Price ASC LIMIT {}",
+            candidate_limit
+        ));
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt
+        let mut rows: Vec<serde_json::Value> = stmt
             .query_map(rusqlite::params![like_val, like_pkg], row_to_part_json)?
             .filter_map(|r| r.ok())
             .collect();
+        rows.retain(|part| {
+            part["description"]
+                .as_str()
+                .is_some_and(|description| contains_numeric_token(description, &value))
+        });
+        rows.truncate(limit);
         Ok(rows)
     })
     .await??;
@@ -557,24 +903,48 @@ async fn handle_jlcpcb_stats(
     let meta = tokio::fs::metadata(&db_path).await?;
     let size_bytes = meta.len();
 
-    let count = tokio::task::spawn_blocking({
+    let (count, catalog_metadata) = tokio::task::spawn_blocking({
         let db_path = db_path.clone();
-        move || -> anyhow::Result<i64> {
+        move || -> anyhow::Result<(i64, Option<CatalogMetadata>)> {
             let conn = rusqlite::Connection::open(&db_path)?;
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM components", [], |r| r.get(0))?;
-            Ok(count)
+            let has_metadata: bool = conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'catalog_metadata'
+                )",
+                [],
+                |row| row.get(0),
+            )?;
+            let metadata = if has_metadata {
+                conn.query_row(
+                    "SELECT catalog, source_date, source_last_updated
+                     FROM catalog_metadata LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .ok()
+            } else {
+                None
+            };
+            Ok((count, metadata))
         }
     })
     .await??;
 
+    let mut body = json!({
+        "exists": true,
+        "path": db_path.to_str().unwrap_or(""),
+        "size_bytes": size_bytes,
+        "part_count": count
+    });
+    if let Some((catalog, source_date, source_last_updated)) = catalog_metadata {
+        body["catalog"] = json!(catalog);
+        body["catalog_date"] = json!(source_date);
+        body["catalog_last_updated"] = json!(source_last_updated);
+    }
     Ok(CallToolResult::text(
-        serde_json::to_string_pretty(&json!({
-            "exists": true,
-            "path": db_path.to_str().unwrap_or(""),
-            "size_bytes": size_bytes,
-            "part_count": count
-        }))
-        .unwrap(),
+        serde_json::to_string_pretty(&body).unwrap(),
     ))
 }
 
@@ -940,6 +1310,206 @@ mod retry_backoff_tests {
 }
 
 #[cfg(test)]
+mod jlcpcb_download_tests {
+    use super::*;
+    use axum::body::Bytes;
+    use axum::routing::get;
+    use axum::Router;
+
+    fn seed_source_database(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE parts USING fts5(
+                 'LCSC Part', 'First Category', 'Second Category', 'MFR.Part',
+                 'Package', 'Solder Joint', 'Manufacturer', 'Library Type',
+                 'Description', 'Datasheet', 'Price', 'Stock'
+             );
+             CREATE TABLE meta(filename, size, partcount, date, last_update);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parts VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                "C1002",
+                "Filters",
+                "Ferrite Beads",
+                "GZ1608D601TF",
+                "0603",
+                2,
+                "Sunlord",
+                "Basic",
+                "600 ohm ferrite bead",
+                "https://example.test/C1002.pdf",
+                "1-199:0.019,200-599:0.016",
+                "1078400",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta VALUES ('cache.sqlite3', 1234, 1, '2026-07-21', '2026-07-21T08:21:41')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn zip_database(database_path: &std::path::Path, filename: &str) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
+        writer.start_file(filename, options).unwrap();
+        writer
+            .write_all(&std::fs::read(database_path).unwrap())
+            .unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn catalog_variants_map_to_published_files() {
+        let current = catalog_spec("current").unwrap();
+        assert_eq!(current.database_filename, "current-parts-fts5.db");
+        assert_eq!(
+            current.chunk_count_filename,
+            "chunk_num_current_parts_fts5.txt"
+        );
+        assert!(catalog_spec("unknown").is_none());
+    }
+
+    #[test]
+    fn parses_first_quantity_price_tier() {
+        assert_eq!(first_tier_price("1-199:0.019,200-599:0.016"), 0.019);
+        assert_eq!(first_tier_price("0.25"), 0.25);
+        assert_eq!(first_tier_price(""), 0.0);
+        assert_eq!(first_tier_price("not-a-price"), 0.0);
+    }
+
+    #[test]
+    fn numeric_value_matching_rejects_larger_values_containing_the_query() {
+        assert!(contains_numeric_token("10kΩ thick film resistor", "10k"));
+        assert!(contains_numeric_token("resistor 10K 1%", "10k"));
+        assert!(!contains_numeric_token("110kΩ thick film resistor", "10k"));
+        assert!(!contains_numeric_token("910kΩ thick film resistor", "10k"));
+        assert!(!contains_numeric_token("10.2kΩ thick film resistor", "10k"));
+    }
+
+    #[test]
+    fn converts_published_schema_to_konnect_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let target = dir.path().join("target.db");
+        seed_source_database(&source);
+        let spec = catalog_spec("current").unwrap();
+
+        let stats =
+            convert_catalog_database(&source, &target, spec, "https://example.test").unwrap();
+
+        assert_eq!(stats.part_count, 1);
+        assert_eq!(stats.basic_count, 1);
+        assert_eq!(stats.source_date, "2026-07-21");
+        let conn = rusqlite::Connection::open(target).unwrap();
+        let row: (String, String, String, f64, i64) = conn
+            .query_row(
+                "SELECT LCSC, Category, MFR_Part, Price, Stock FROM components",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, "C1002");
+        assert_eq!(row.1, "Filters / Ferrite Beads");
+        assert_eq!(row.2, "GZ1608D601TF");
+        assert_eq!(row.3, 0.019);
+        assert_eq!(row.4, 1_078_400);
+    }
+
+    #[test]
+    fn extracts_only_the_expected_database_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let archive = dir.path().join("catalog.zip");
+        let extracted = dir.path().join("extracted.db");
+        seed_source_database(&source);
+        std::fs::write(&archive, zip_database(&source, "current-parts-fts5.db")).unwrap();
+
+        extract_catalog_database(&archive, "current-parts-fts5.db", &extracted).unwrap();
+
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            std::fs::read(extracted).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn downloads_and_reassembles_all_catalog_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let archive_path = dir.path().join("download.zip");
+        seed_source_database(&source);
+        let archive = zip_database(&source, "current-parts-fts5.db");
+        let split = archive.len() / 2;
+        let first = Bytes::copy_from_slice(&archive[..split]);
+        let second = Bytes::copy_from_slice(&archive[split..]);
+        let app = Router::new()
+            .route("/chunk_num_current_parts_fts5.txt", get(|| async { "2" }))
+            .route(
+                "/current-parts-fts5.db.zip.001",
+                get(move || {
+                    let bytes = first.clone();
+                    async move { bytes }
+                }),
+            )
+            .route(
+                "/current-parts-fts5.db.zip.002",
+                get(move || {
+                    let bytes = second.clone();
+                    async move { bytes }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        let (chunks, bytes) = download_catalog_archive(
+            &client,
+            &format!("http://{address}"),
+            catalog_spec("current").unwrap(),
+            &archive_path,
+        )
+        .await
+        .unwrap();
+
+        server.abort();
+        assert_eq!(chunks, 2);
+        assert_eq!(bytes as usize, archive.len());
+        assert_eq!(std::fs::read(archive_path).unwrap(), archive);
+    }
+
+    #[test]
+    fn atomic_replace_preserves_old_database_until_new_one_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("jlcpcb.db");
+        let replacement = dir.path().join("replacement.db");
+        let backup = dir.path().join("backup.db");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&replacement, b"new").unwrap();
+
+        replace_database_atomically(&replacement, &destination, &backup).unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), b"new");
+        assert!(!backup.exists());
+    }
+}
+
+#[cfg(test)]
 mod jlcpcb_cache_tests {
     use super::*;
     use crate::router::ToolRouter;
@@ -1056,6 +1626,55 @@ mod jlcpcb_cache_tests {
 
         assert_eq!(response_json(&first)["cached"], json!(false));
         assert_eq!(response_json(&second)["cached"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn suggest_alternatives_requires_exact_value_and_known_price_for_budget() {
+        let (_dir, db_path) = seed_test_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO components VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "C110K",
+                "CHEAP-110K",
+                "0402",
+                "Example",
+                "Extended",
+                "110k resistor 0402",
+                0.001,
+                100
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO components VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "CUNKNOWN",
+                "UNKNOWN-10K",
+                "0402",
+                "Example",
+                "Extended",
+                "10k resistor 0402",
+                0.0,
+                100
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        let ctx = test_ctx();
+        let args = json!({
+            "value": "10k",
+            "footprint": "Resistor_SMD:R_0402",
+            "max_price_usd": 0.5,
+            "limit": 5,
+            "output_path": db_path.to_str().unwrap()
+        });
+
+        let result = response_json(&handle_suggest_alternatives(&args, &ctx).await.unwrap());
+
+        assert_eq!(result["alternatives"].as_array().unwrap().len(), 1);
+        assert_eq!(result["alternatives"][0]["lcsc"], json!("C14663"));
+        assert_eq!(result["alternatives"][0]["price"], json!(0.01));
     }
 
     fn response_json(result: &CallToolResult) -> serde_json::Value {
