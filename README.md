@@ -100,17 +100,12 @@ The full tool catalog is documented in [tool-directory.md](tool-directory.md).
 
 ### From a tagged release (recommended when available)
 
-> **Release availability:** PCM archives are created only for `v*` tags. If the
-> [Releases](https://github.com/perara/Konnect/releases) page has no assets yet,
-> build the current branch from source; do not substitute an older upstream archive
-> when testing these Linux parity changes.
-
-1. Download the PCM archive for your operating system from
-   [Releases](https://github.com/perara/Konnect/releases):
-   - Windows: `konnect-pcm-windows-v<version>.zip`
-   - Linux: `konnect-pcm-linux-v<version>.zip`
-   - The `.tar.gz`/standalone archives are for MCP clients that do not need the
-     KiCAD toolbar integration.
+1. Download the package for your OS from [Releases](https://github.com/mixelpixx/Konnect/releases):
+   `konnect-pcm-v<version>-windows.zip`, `-macos.zip`, or `-linux.zip`. Each
+   bundles that platform's server binary — the macOS package is a universal
+   build, so one download covers Apple Silicon and Intel. (The `konnect-pcm-*`
+   assets are the KiCAD plugin packages; the other archives are standalone
+   server binaries.)
 2. Open KiCAD 10 → **Plugin and Content Manager**
 3. Click **Install from File** and select the zip
 4. Restart KiCAD
@@ -123,15 +118,62 @@ instance with the separately launched MCP server.
 ### Build from source
 
 ```bash
-# protoc is required (protobuf code generation)
-# Windows: choco install protoc / macOS: brew install protobuf
-# Debian/Ubuntu: apt install protobuf-compiler libprotobuf-dev
+# protoc is required (protobuf code generation), and cmake (the nng crate
+# compiles the NNG C library with it).
+# Windows: choco install protoc cmake
+# macOS:   brew install protobuf cmake
+# Linux:   apt install protobuf-compiler cmake
 cargo build --release -p konnect
 ```
 
-Linux source builds also need a C/C++ toolchain, CMake, and `pkg-config`. Building
-the schematic viewer requires GTK3 and WebKitGTK 4.1 development packages. See
-[Linux support](docs/LINUX.md) for per-distribution commands.
+### macOS
+
+The [Releases](https://github.com/mixelpixx/Konnect/releases) page ships
+standalone server binaries for both Apple Silicon (`aarch64-apple-darwin`) and
+Intel (`x86_64-apple-darwin`). They are not yet code-signed, so if you download
+one through a browser, clear the quarantine flag before first launch:
+
+```bash
+tar xzf konnect-v*-aarch64-apple-darwin.tar.gz
+xattr -d com.apple.quarantine ./konnect   # only needed for browser downloads
+./konnect --help
+```
+
+Or build from source as above (verified on Apple Silicon; the same
+`target/release/konnect` binary is the MCP server).
+
+KiCad on macOS keeps its tools inside the app bundle and they are not on
+`PATH`, so point Konnect at them in `~/Library/Application Support/konnect/config.toml`:
+
+```toml
+kicad_cli = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+kicad_binary = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad"
+# KiCad 10's IPC socket on macOS (enable it in KiCad:
+# Preferences → Plugins → "Enable KiCad API")
+ipc_address = "ipc:///tmp/kicad/api.sock"
+```
+
+Claude Desktop's config lives at
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "konnect": {
+      "command": "/path/to/konnect"
+    }
+  }
+}
+```
+
+For Claude Code, put the same snippet in a `.mcp.json` in your project root.
+
+Starting with the next release, the PCM package for macOS
+(`konnect-pcm-v<version>-macos.zip`) bundles a universal server binary; for
+v0.1.3 and earlier, install via a release tarball or a source build. The schematic
+viewer compiles and launches on macOS (Tauri 2 uses the system WKWebView —
+WebView2 is only a Windows requirement) but hasn't had the same mileage as
+the Windows build yet.
 
 ## Setup with Claude Desktop
 
@@ -186,7 +228,10 @@ the main workspace — see [DEV.md](DEV.md) for build steps.
 
 ## Requirements
 
-- KiCAD 10 on Windows or Linux
+- KiCAD 10 (Windows is the most-tested platform; macOS works from the release
+  binaries or a source build — see the [macOS section](#macos) above. Linux
+  compiles and passes tests in CI but hasn't had per-platform QA yet; both are
+  tracked on the [roadmap](ROADMAP.md))
 - `kicad-cli` (ships with KiCAD — used for exports, ERC, DRC)
 - Standard KiCAD symbols and footprints (`kicad-library` on Arch/CachyOS;
   `kicad-symbols` and `kicad-footprints` from the official KiCAD Ubuntu PPA)

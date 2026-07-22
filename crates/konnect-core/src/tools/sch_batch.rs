@@ -7,7 +7,9 @@
 
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
-use crate::tools::{get_path, opt_str, require_f64, require_str, ToolDef};
+use crate::tools::{
+    find_symbol_instance_block, get_path, opt_str, require_f64, require_str, ToolDef,
+};
 use konnect_sexp::{
     geometry::{point_on_segment, points_coincident, snap_point},
     schematic::{
@@ -236,13 +238,11 @@ pub fn tools() -> Vec<ToolDef> {
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
-/// Find the `(symbol ...)` block for a reference designator.
+/// Find the `(symbol ...)` block for a reference designator, plus its leading
+/// whitespace so deletion leaves clean formatting.
 /// Returns `(block_start, block_end)` byte offsets in `content`.
 fn find_symbol_block(content: &str, reference: &str) -> Option<(usize, usize)> {
-    let search_pat = format!(r#"(property "Reference" "{reference}""#);
-    let ref_offset = content.find(&search_pat)?;
-    let before = &content[..ref_offset];
-    let sym_start = before.rfind("\n  (symbol").map(|p| p + 1)?;
+    let (sym_start, _) = find_symbol_instance_block(content, reference)?;
     find_block_with_leading_whitespace(content, sym_start)
 }
 
@@ -251,11 +251,7 @@ fn find_symbol_block(content: &str, reference: &str) -> Option<(usize, usize)> {
 /// `reference`. Only the bytes inside the opening quote are included (i.e. the
 /// replacement does NOT need to include surrounding quotes).
 fn field_value_range(content: &str, reference: &str, field: &str) -> Option<(usize, usize)> {
-    let ref_search = format!(r#"(property "Reference" "{reference}""#);
-    let ref_pos = content.find(&ref_search)?;
-    let before = &content[..ref_pos];
-    let sym_start = before.rfind("\n  (symbol").map(|p| p + 1)?;
-    let (_, sym_end) = find_block_with_leading_whitespace(content, sym_start)?;
+    let (sym_start, sym_end) = find_symbol_instance_block(content, reference)?;
     let sym_block = &content[sym_start..sym_end];
 
     let field_search = format!(r#"(property "{field}" ""#);
@@ -454,26 +450,10 @@ async fn handle_bulk_move(
         };
 
         // Locate symbol block for this reference
-        let ref_search = format!(r#"(property "Reference" "{reference}""#);
-        let ref_pos = match content.find(&ref_search) {
-            Some(p) => p,
-            None => {
-                errors.push(format!("'{}' not found", reference));
-                continue;
-            }
-        };
-        let before = &content[..ref_pos];
-        let sym_start = match before.rfind("\n  (symbol").map(|p| p + 1) {
-            Some(p) => p,
-            None => {
-                errors.push(format!("Symbol block for '{}' not found", reference));
-                continue;
-            }
-        };
-        let (_, sym_end) = match find_block_with_leading_whitespace(&content, sym_start) {
+        let (sym_start, sym_end) = match find_symbol_instance_block(&content, reference) {
             Some(r) => r,
             None => {
-                errors.push(format!("Cannot parse symbol block for '{}'", reference));
+                errors.push(format!("'{}' not found", reference));
                 continue;
             }
         };

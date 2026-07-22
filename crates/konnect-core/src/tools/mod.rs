@@ -213,7 +213,7 @@ mod query_cache_tests {
 /// Shorthand for building a ToolDef with a typed async handler function.
 ///
 /// Usage:
-/// ```rust
+/// ```rust,ignore
 /// tool!(
 ///     "tool_name",
 ///     "Description of what it does.",
@@ -291,6 +291,124 @@ pub fn get_path(args: &Value, key: &str) -> anyhow::Result<std::path::PathBuf> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: '{}'", key))?;
     Ok(std::path::PathBuf::from(s))
+}
+
+/// Project name used in symbol/sheet `(instances (project "..." ...))` entries:
+/// the schematic's file stem, matching what eeschema writes when it saves a
+/// standalone root sheet.
+pub fn project_name_for(sch_path: &std::path::Path) -> String {
+    sch_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Minimal valid blank schematic, with a freshly generated root `(uuid ...)`.
+/// The root UUID is mandatory: KiCAD's netlister resolves symbol instance
+/// paths against it and silently forms no wire-only nets when it's missing.
+pub fn blank_schematic_template() -> String {
+    format!(
+        "(kicad_sch\n\t(version 20250610)\n\t(generator \"konnect\")\n\t(generator_version \"10.0\")\n\t(uuid \"{}\")\n\t(paper \"A4\")\n\t(lib_symbols\n\t)\n)\n",
+        konnect_sexp::writer::new_uuid()
+    )
+}
+
+/// Root UUID of a loaded schematic, assigning a fresh one when the file
+/// predates Konnect writing root UUIDs — the file is repaired on its next
+/// overwrite. Instance paths are built as "/<root-uuid>[/<sheet-uuid>…]".
+pub fn ensure_root_uuid(sch: &mut konnect_schematic_editor::Schematic) -> String {
+    match &sch.uuid {
+        Some(u) => u.clone(),
+        None => {
+            let u = konnect_sexp::writer::new_uuid();
+            sch.uuid = Some(u.clone());
+            u
+        }
+    }
+}
+
+// ─── Schematic text helpers ──────────────────────────────────────────────────
+
+/// Byte range of the placed `(symbol …)` block whose Reference property is
+/// `reference`, for the text-editing tool paths.
+///
+/// Works regardless of indentation — eeschema saves with tabs, this crate's
+/// writer uses two spaces — and skips library definitions inside `lib_symbols`,
+/// which carry a Reference property of their own (`"R"`, `"#PWR"`, or whatever
+/// a hand-authored library sets) but never a `lib_id`. Only placed instances
+/// have one, so that's the discriminator.
+pub fn find_symbol_instance_block(content: &str, reference: &str) -> Option<(usize, usize)> {
+    let ref_search = format!(r#"(property "Reference" "{reference}""#);
+    let mut from = 0usize;
+
+    while let Some(rel) = content[from..].find(&ref_search) {
+        let ref_pos = from + rel;
+        if let Some((start, end)) =
+            konnect_sexp::writer::find_enclosing_block(content, "symbol", ref_pos)
+        {
+            if content[start..end].contains("(lib_id ") {
+                return Some((start, end));
+            }
+        }
+        from = ref_pos + ref_search.len();
+    }
+    None
+}
+
+#[cfg(test)]
+mod symbol_block_tests {
+    use super::*;
+
+    /// Instance blocks as eeschema writes them: tab-indented, and preceded by a
+    /// lib_symbols definition carrying its own Reference property.
+    const EESCHEMA_STYLE: &str = "(kicad_sch\n\t(lib_symbols\n\t\t(symbol \"Device:R\"\n\t\t\t(property \"Reference\" \"R\"\n\t\t\t\t(at 2.032 0 90)\n\t\t\t)\n\t\t)\n\t)\n\t(symbol\n\t\t(lib_id \"Device:R\")\n\t\t(at 100 80 0)\n\t\t(property \"Reference\" \"R1\"\n\t\t\t(at 102 78 0)\n\t\t)\n\t\t(property \"Value\" \"10k\"\n\t\t\t(at 102 82 0)\n\t\t)\n\t)\n)\n";
+
+    /// Same shape, two-space indented, as this crate's writer emits.
+    const KONNECT_STYLE: &str = "(kicad_sch\n  (lib_symbols\n    (symbol \"Device:R\"\n      (property \"Reference\" \"R\"\n        (at 2.032 0 90)\n      )\n    )\n  )\n  (symbol\n    (lib_id \"Device:R\")\n    (at 100 80 0)\n    (property \"Reference\" \"R1\"\n      (at 102 78 0)\n    )\n  )\n)\n";
+
+    #[test]
+    fn finds_instance_in_tab_indented_file() {
+        let (start, end) = find_symbol_instance_block(EESCHEMA_STYLE, "R1").expect("R1 block");
+        let block = &EESCHEMA_STYLE[start..end];
+        assert!(block.starts_with("(symbol"));
+        assert!(block.contains("(lib_id \"Device:R\")"));
+        assert!(block.contains("\"R1\""));
+        assert!(
+            block.contains("\"10k\""),
+            "block must span the whole symbol"
+        );
+    }
+
+    #[test]
+    fn finds_instance_in_space_indented_file() {
+        let (start, end) = find_symbol_instance_block(KONNECT_STYLE, "R1").expect("R1 block");
+        assert!(KONNECT_STYLE[start..end].contains("(lib_id \"Device:R\")"));
+    }
+
+    #[test]
+    fn library_definition_is_not_mistaken_for_an_instance() {
+        // A hand-authored library whose default Reference matches a placed
+        // instance's designator must not shadow the instance.
+        let sch = "(kicad_sch\n\t(lib_symbols\n\t\t(symbol \"Custom:Thing\"\n\t\t\t(property \"Reference\" \"U1\"\n\t\t\t\t(at 0 0 0)\n\t\t\t)\n\t\t)\n\t)\n\t(symbol\n\t\t(lib_id \"Custom:Thing\")\n\t\t(property \"Reference\" \"U1\"\n\t\t\t(at 5 5 0)\n\t\t)\n\t)\n)\n";
+        let (start, end) = find_symbol_instance_block(sch, "U1").expect("instance");
+        assert!(
+            sch[start..end].contains("(lib_id "),
+            "must skip the lib_symbols definition and return the placed instance"
+        );
+    }
+
+    #[test]
+    fn unknown_reference_is_none() {
+        assert!(find_symbol_instance_block(EESCHEMA_STYLE, "R99").is_none());
+    }
+
+    #[test]
+    fn reference_prefix_does_not_match_longer_designator() {
+        // "R1" must not match the R12 instance.
+        let sch = "(kicad_sch\n\t(symbol\n\t\t(lib_id \"Device:R\")\n\t\t(property \"Reference\" \"R12\"\n\t\t\t(at 1 1 0)\n\t\t)\n\t)\n)\n";
+        assert!(find_symbol_instance_block(sch, "R1").is_none());
+    }
 }
 
 #[cfg(test)]
@@ -469,19 +587,51 @@ fn extract_symbol_block(content: &str, symbol_name: &str) -> Option<String> {
     }
 }
 
+/// Structured "this lib_id doesn't exist" error, with did-you-mean hints —
+/// silently accepting an unresolvable lib_id writes a netlist-invisible
+/// component with an empty pin list (#34).
+pub fn lib_symbol_not_found_error(lib_id: &str) -> CallToolResult {
+    let library = lib_id.split(':').next().unwrap_or(lib_id);
+    let mut msg = if !konnect_schematic_editor::library::library_exists(library) {
+        format!(
+            "Library '{}' not found in the installed KiCAD symbol libraries \
+             (lib_id '{}'). Check the library name, the KiCAD install, or \
+             KICAD10_SYMBOL_DIR.",
+            library, lib_id
+        )
+    } else {
+        format!(
+            "Library symbol '{}' not found in the installed KiCAD libraries.",
+            lib_id
+        )
+    };
+    let suggestions = konnect_schematic_editor::library::suggest_symbols(lib_id, 3);
+    if !suggestions.is_empty() {
+        msg.push_str(&format!(
+            " Did you mean: {}? (KiCAD 10 renamed several older symbol names)",
+            suggestions.join(", ")
+        ));
+    }
+    CallToolResult::error(msg)
+}
+
 /// Insert a symbol definition into the schematic's lib_symbols section.
 /// Creates the lib_symbols section if it doesn't exist. Skips if already present.
-pub fn ensure_lib_symbol_in_schematic(content: &mut String, lib_id: &str) {
+///
+/// Returns `false` when `lib_id` cannot be resolved — callers must surface
+/// that as an error rather than writing a definition-less instance (#34).
+#[must_use]
+pub fn ensure_lib_symbol_in_schematic(content: &mut String, lib_id: &str) -> bool {
     // Check if already present
     let lib_id_check = format!("(symbol \"{}\"", lib_id);
     if content.contains(&lib_id_check) {
-        return;
+        return true;
     }
 
     // Resolve the symbol from KiCAD libraries
     let sym_def = match resolve_lib_symbol(lib_id) {
         Some(s) => s,
-        None => return,
+        None => return false,
     };
 
     // Ensure lib_symbols section exists
@@ -521,6 +671,7 @@ pub fn ensure_lib_symbol_in_schematic(content: &mut String, lib_id: &str) {
             .join("\n");
         content.insert_str(ls_end, &format!("\n{}\n\t", indented));
     }
+    true
 }
 
 /// Find directories where KiCAD symbol libraries are stored.
@@ -547,7 +698,29 @@ fn find_kicad_symbol_dirs() -> Vec<std::path::PathBuf> {
             }
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // KiCad on macOS ships its libraries inside the app bundle.
+        let mut candidates = vec![
+            std::path::PathBuf::from(
+                "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols",
+            ),
+            std::path::PathBuf::from("/usr/local/share/kicad/symbols"),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            // Per-user install (KiCad.app dragged into ~/Applications)
+            candidates.push(
+                std::path::PathBuf::from(home)
+                    .join("Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols"),
+            );
+        }
+        for p in candidates {
+            if p.is_dir() && !dirs.contains(&p) {
+                dirs.push(p);
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let candidates = [
             "/usr/share/kicad/symbols",

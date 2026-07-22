@@ -5,15 +5,21 @@
 
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
-use crate::tools::{get_path, opt_f64, opt_str, require_f64, require_str, ToolContext, ToolDef};
+use crate::tools::{
+    get_path, opt_f64, opt_str, project_name_for, require_f64, require_str, ToolContext, ToolDef,
+};
 use konnect_schematic_editor as cse;
 use konnect_sexp::{
     geometry::snap_point,
+    parser::parse_sexp,
     schematic::{
         extract_lib_pins, extract_symbol_instances, extract_wires, find_t_junctions,
-        format_junction, format_wire, pin_endpoint, read_schematic,
+        format_junction, format_wire, parse_at, pin_endpoint, read_schematic,
     },
-    writer::{apply_edits, find_block_with_leading_whitespace, write_atomic, SexpEdit},
+    writer::{
+        apply_edits, find_balanced_block, find_block_starts, find_block_with_leading_whitespace,
+        write_atomic, SexpEdit,
+    },
 };
 use serde_json::json;
 
@@ -669,26 +675,27 @@ async fn handle_add_net_label(
 
     let mut sch = cse::Schematic::load(&sch_path)?;
 
+    // set_rotation also writes the (effects … (justify …)) block. justify is
+    // what turns the text away from the anchor, so a label created without one
+    // renders backwards at 180°/270°, over whatever it points at.
     match label_type {
         "global_label" => {
             sch.add_global_label(&net, shape, x, y);
-            // Set rotation on the just-added global label
             let idx = sch.global_labels.len() - 1;
             if let Some(gl) = sch.global_labels.get_mut(idx) {
-                gl.at.rotation = Some(rotation);
+                gl.set_rotation(rotation);
             }
         }
         "hierarchical_label" => {
             sch.add_hierarchical_label(&net, shape, x, y);
-            // Set rotation on the just-added hierarchical label
             let idx = sch.hierarchical_labels.len() - 1;
             if let Some(hl) = sch.hierarchical_labels.get_mut(idx) {
-                hl.at.rotation = Some(rotation);
+                hl.set_rotation(rotation);
             }
         }
         _ => {
             let label = sch.add_label(&net, x, y);
-            label.at.rotation = Some(rotation);
+            label.set_rotation(rotation);
         }
     }
 
@@ -719,56 +726,123 @@ async fn handle_delete_net_label(
 
     let content = std::fs::read_to_string(&sch_path)?;
 
-    // Find ALL label occurrences with this net name, then pick the closest to (target_x, target_y).
-    // This handles the common case of multiple labels on the same net.
-    let search = format!(r#""{net}""#);
-    let label_starts_patterns = ["(net_label", "(global_label", "(hierarchical_label"];
+    let labels = find_label_blocks(&content);
+    let named: Vec<&LabelBlock> = labels.iter().filter(|l| l.net == net).collect();
 
-    let mut best_start = None;
-    let mut best_dist = f64::MAX;
-
-    let mut search_from = 0usize;
-    while let Some(name_offset) = content[search_from..]
-        .find(&search)
-        .map(|i| i + search_from)
-    {
-        // Walk back to find the enclosing label block
-        let before = &content[..name_offset];
-        if let Some(label_start) = label_starts_patterns
-            .iter()
-            .filter_map(|s| before.rfind(s))
-            .max()
-        {
-            // Parse the (at X Y) from this block to check proximity
-            let block_rest = &content[label_start..];
-            if let Some(at_pos) = block_rest.find("(at ") {
-                let at_str = &block_rest[at_pos + 4..];
-                let parts: Vec<&str> = at_str.split([' ', ')']).collect();
-                if parts.len() >= 2 {
-                    let lx: f64 = parts[0].parse().unwrap_or(f64::MAX);
-                    let ly: f64 = parts[1].parse().unwrap_or(f64::MAX);
-                    let dist = (lx - target_x).abs() + (ly - target_y).abs();
-                    if dist < best_dist {
-                        best_dist = dist;
-                        best_start = Some(label_start);
-                    }
-                }
-            }
-        }
-        search_from = name_offset + 1;
+    if named.is_empty() {
+        return Ok(CallToolResult::error(format!(
+            "No label named '{}' in this schematic",
+            net
+        )));
     }
 
-    let label_start = best_start.ok_or_else(|| anyhow::anyhow!("Label '{}' not found", net))?;
+    // Exact position match. Deleting the *nearest* label instead would silently
+    // remove a same-named label elsewhere on the sheet — same-named labels are
+    // how KiCAD joins nets, so they are the normal case, not an edge case.
+    let matched: Vec<&&LabelBlock> = named
+        .iter()
+        .filter(|l| same_point(l.x, target_x) && same_point(l.y, target_y))
+        .collect();
 
-    let (del_start, del_end) = find_block_with_leading_whitespace(&content, label_start)
+    let label = match matched.as_slice() {
+        [one] => **one,
+        [] => {
+            let positions: Vec<String> = named
+                .iter()
+                .map(|l| format!("{} at ({}, {})", l.kind, l.x, l.y))
+                .collect();
+            return Ok(CallToolResult::error(format!(
+                "No label '{}' at ({}, {}). Found {} label(s) named '{}': {}",
+                net,
+                target_x,
+                target_y,
+                named.len(),
+                net,
+                positions.join("; ")
+            )));
+        }
+        _ => {
+            return Ok(CallToolResult::error(format!(
+                "{} labels named '{}' share position ({}, {}) — delete by uuid is not \
+                 supported yet; remove the duplicates in eeschema",
+                matched.len(),
+                net,
+                target_x,
+                target_y
+            )));
+        }
+    };
+
+    let (del_start, del_end) = find_block_with_leading_whitespace(&content, label.start)
         .ok_or_else(|| anyhow::anyhow!("Cannot parse label block"))?;
 
+    let kind = label.kind;
     let edits = vec![SexpEdit::delete(del_start, del_end)];
     let new_content = apply_edits(content, edits);
     write_atomic(&sch_path, &new_content)?;
-    Ok(CallToolResult::json(
-        &json!({ "deleted_label": net, "at": { "x": target_x, "y": target_y } }),
-    ))
+    Ok(CallToolResult::json(&json!({
+        "deleted_label": net,
+        "type": kind,
+        "at": { "x": target_x, "y": target_y }
+    })))
+}
+
+/// One label block located in the raw file text.
+struct LabelBlock {
+    /// Byte offset of the block's opening paren.
+    start: usize,
+    /// S-expression tag: `label`, `global_label`, or `hierarchical_label`.
+    kind: &'static str,
+    net: String,
+    x: f64,
+    y: f64,
+}
+
+/// KiCAD's three label tags. `label` is the plain net label — the type
+/// `add_schematic_net_label` writes by default. (`net_label` is this codebase's
+/// internal name for it and never appears in a .kicad_sch.)
+const LABEL_TAGS: [&str; 3] = ["label", "global_label", "hierarchical_label"];
+
+/// Locate every label block in `content` by scanning forward for the label tags
+/// and parsing each block, rather than searching for a name string and walking
+/// backwards — a quoted net name also appears in symbol properties, pin names,
+/// and sheet pins, and walking back from one of those lands on an unrelated
+/// block.
+fn find_label_blocks(content: &str) -> Vec<LabelBlock> {
+    let mut out = Vec::new();
+    for kind in LABEL_TAGS {
+        for start in find_block_starts(content, kind) {
+            let Some((bs, be)) = find_balanced_block(content, start) else {
+                continue;
+            };
+            let Ok(node) = parse_sexp(&content[bs..be]) else {
+                continue;
+            };
+            // (label "NAME" (at X Y ROT) …) — the name is the first argument,
+            // and (at) is a direct child, so a nested (at) on a global label's
+            // intersheet-refs property can't be mistaken for the anchor.
+            let Some(net) = node.get(1).and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some((x, y, _)) = parse_at(&node) else {
+                continue;
+            };
+            out.push(LabelBlock {
+                start: bs,
+                kind,
+                net: net.to_string(),
+                x,
+                y,
+            });
+        }
+    }
+    out
+}
+
+/// Compare schematic coordinates. KiCAD stores mm to 4 decimals, so this is an
+/// exact match in practice while tolerating float round-trip noise.
+fn same_point(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6
 }
 
 async fn handle_rotate_label(
@@ -794,35 +868,105 @@ async fn handle_rotate_label(
     };
 
     let content = std::fs::read_to_string(&sch_path)?;
-    let search = format!(r#""{net}""#);
-    let found = content
-        .find(&search)
-        .ok_or_else(|| anyhow::anyhow!("Label '{}' not found", net))?;
-    let before = &content[..found];
-    let label_start = ["(net_label", "(global_label", "(hierarchical_label"]
+
+    let labels = find_label_blocks(&content);
+    let named: Vec<&LabelBlock> = labels.iter().filter(|l| l.net == net).collect();
+    let Some(label) = named
         .iter()
-        .filter_map(|s| before.rfind(s))
-        .max()
-        .ok_or_else(|| anyhow::anyhow!("Label block not found"))?;
+        .find(|l| same_point(l.x, x) && same_point(l.y, y))
+    else {
+        let positions: Vec<String> = named
+            .iter()
+            .map(|l| format!("{} at ({}, {})", l.kind, l.x, l.y))
+            .collect();
+        return Ok(CallToolResult::error(if positions.is_empty() {
+            format!("No label named '{}' in this schematic", net)
+        } else {
+            format!(
+                "No label '{}' at ({}, {}). Found: {}",
+                net,
+                x,
+                y,
+                positions.join("; ")
+            )
+        }));
+    };
 
-    // Find the (at X Y ROT) in the label block
-    let at_search = "(at ";
-    let at_pos = content[label_start..]
-        .find(at_search)
-        .map(|o| label_start + o + at_search.len())
+    let (block_start, block_end) = find_balanced_block(&content, label.start)
+        .ok_or_else(|| anyhow::anyhow!("Cannot parse label block"))?;
+    let block = &content[block_start..block_end];
+
+    let mut edits = Vec::new();
+
+    // 1. The (at X Y ROT) anchor.
+    let at_rel = block
+        .find("(at ")
         .ok_or_else(|| anyhow::anyhow!("No (at) in label block"))?;
-    let close_pos = content[at_pos..]
+    let at_val = block_start + at_rel + "(at ".len();
+    let at_close = content[at_val..]
         .find(')')
-        .map(|o| at_pos + o)
+        .map(|o| at_val + o)
         .ok_or_else(|| anyhow::anyhow!("Malformed (at)"))?;
+    edits.push(SexpEdit::replace(
+        at_val,
+        at_close,
+        format!("{x} {y} {rotation}"),
+    ));
 
-    let new_at = format!("{x} {y} {rotation}");
-    let edits = vec![SexpEdit::replace(at_pos, close_pos, new_at)];
+    // 2. The justify, which is what actually turns the text — rotating the
+    //    anchor alone leaves the text running back over whatever the label
+    //    points at. Plain labels also carry `bottom` to lift text off the wire.
+    let plain = label.kind == "label";
+    let justify = konnect_sexp::schematic::label_justify(rotation);
+    let justify_sexp = if plain {
+        format!("(justify {justify} bottom)")
+    } else {
+        format!("(justify {justify})")
+    };
+
+    if let Some(j_rel) = block.find("(justify ") {
+        // Replace the existing justify in place.
+        let j_start = block_start + j_rel;
+        let j_end = find_balanced_block(&content, j_start)
+            .map(|(_, e)| e)
+            .ok_or_else(|| anyhow::anyhow!("Malformed (justify)"))?;
+        edits.push(SexpEdit::replace(j_start, j_end, justify_sexp));
+    } else if let Some(e_rel) = block.find("(effects") {
+        // An effects block with no justify — add one just inside it.
+        let e_start = block_start + e_rel;
+        let (_, e_end) = find_balanced_block(&content, e_start)
+            .ok_or_else(|| anyhow::anyhow!("Malformed (effects)"))?;
+        edits.push(SexpEdit::insert(e_end - 1, format!(" {justify_sexp}")));
+    } else {
+        // No effects at all — the shape add_schematic_net_label used to write.
+        // Insert a complete block where eeschema puts it: before the uuid,
+        // matching that line's indentation.
+        let insert_at = block
+            .find("(uuid")
+            .map(|r| block_start + r)
+            .unwrap_or(block_end - 1);
+        let line_start = content[..insert_at]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(insert_at);
+        let indent: String = content[line_start..insert_at]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        edits.push(SexpEdit::insert(
+            insert_at,
+            format!("(effects (font (size 1.27 1.27)) {justify_sexp})\n{indent}"),
+        ));
+    }
+
     let new_content = apply_edits(content, edits);
     write_atomic(&sch_path, &new_content)?;
-    Ok(CallToolResult::json(
-        &json!({ "rotated_label": net, "rotation": rotation }),
-    ))
+    Ok(CallToolResult::json(&json!({
+        "rotated_label": net,
+        "type": label.kind,
+        "rotation": rotation,
+        "justify": justify
+    })))
 }
 
 async fn handle_move_labels_by_offset(
@@ -922,7 +1066,9 @@ async fn handle_add_power_symbol(
 
     // Embed the power symbol definition in lib_symbols
     let lib_id = format!("power:{}", power_net);
-    cse::library::ensure_lib_symbol(&mut sch, &lib_id)?;
+    if !cse::library::ensure_lib_symbol(&mut sch, &lib_id) {
+        return Ok(crate::tools::lib_symbol_not_found_error(&lib_id));
+    }
 
     // Build the Symbol struct
     let mut sym = cse::Symbol::new(format!("power:{}", power_net), x, y);
@@ -937,22 +1083,16 @@ async fn handle_add_power_symbol(
     sym.properties.push(cse::Property::new("Footprint", ""));
     sym.properties.push(cse::Property::new("Datasheet", ""));
 
-    // Add instances raw node
-    use cse::sexp::{atom, qstr, SexpNode};
-    let instances = SexpNode::List(vec![
-        atom("instances"),
-        SexpNode::List(vec![
-            atom("project"),
-            qstr(""),
-            SexpNode::List(vec![
-                atom("path"),
-                qstr("/"),
-                SexpNode::List(vec![atom("reference"), qstr(&pwr_ref)]),
-                SexpNode::List(vec![atom("unit"), atom("1")]),
-            ]),
-        ]),
-    ]);
-    sym.raw_sub_nodes.push(instances);
+    // Instance entry, keyed to the root sheet UUID like eeschema writes it —
+    // without a resolvable "/<root-uuid>" path KiCAD's netlister drops the
+    // symbol from net formation.
+    let root_uuid = crate::tools::ensure_root_uuid(&mut sch);
+    sym.set_instance_path(
+        &project_name_for(&sch_path),
+        &format!("/{}", root_uuid),
+        &pwr_ref,
+        1,
+    );
 
     sch.add_symbol(sym);
     sch.overwrite()?;
@@ -1273,4 +1413,253 @@ async fn handle_add_schematic_connection(
     Ok(CallToolResult::json(&json!({
         "connected": { "from": [x1, y1], "to": [x2, y2] }
     })))
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use crate::router::ToolRouter;
+    use crate::tools::ServerConfig;
+    use std::sync::Arc;
+
+    fn test_ctx() -> ToolContext {
+        ToolContext::new(
+            ServerConfig {
+                kicad_cli: String::new(),
+                kicad_binary: String::new(),
+                ipc_address: String::new(),
+                project_dir: None,
+                jlcpcb_db_path: None,
+            },
+            Arc::new(ToolRouter::new()),
+        )
+    }
+
+    fn sch_with(labels: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.kicad_sch");
+        std::fs::write(
+            &path,
+            format!(
+                "(kicad_sch\n  (version 20250610)\n  (generator \"konnect\")\n  (uuid \"3af69a4c-1faa-40bd-91dc-c4fc245c4cbd\")\n  (paper \"A4\")\n  (lib_symbols\n  )\n{labels}\n)\n"
+            ),
+        )
+        .unwrap();
+        (dir, path)
+    }
+
+    async fn delete(path: &std::path::Path, net: &str, x: f64, y: f64) -> CallToolResult {
+        handle_delete_net_label(
+            &json!({ "schematic": path.display().to_string(), "net": net, "x": x, "y": y }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap()
+    }
+
+    const TWO_PLAIN: &str = "  (label \"VCC\"\n    (at 100 100 0)\n    (uuid \"11111111-1111-1111-1111-111111111111\")\n  )\n  (label \"VCC\"\n    (at 200 100 0)\n    (uuid \"22222222-2222-2222-2222-222222222222\")\n  )";
+
+    #[tokio::test]
+    async fn deletes_the_plain_label_the_add_tool_writes() {
+        let (_d, path) = sch_with(TWO_PLAIN);
+        let result = delete(&path, "VCC", 200.0, 100.0).await;
+        assert!(!result.is_error, "plain (label) blocks must be deletable");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("(at 100 100 0)"),
+            "the label at (100,100) must survive"
+        );
+        assert!(
+            !after.contains("(at 200 100 0)"),
+            "the targeted label at (200,100) must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_coordinates_delete_nothing_and_report_the_real_positions() {
+        let (_d, path) = sch_with(TWO_PLAIN);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let result = delete(&path, "VCC", 300.0, 300.0).await;
+        assert!(result.is_error, "a miss must not fall back to nearest-wins");
+
+        let crate::mcp::protocol::ToolContent::Text { text } = &result.content[0] else {
+            panic!("expected a text result");
+        };
+        assert!(
+            text.contains("100") && text.contains("200"),
+            "error should list the actual label positions: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "file must be untouched when nothing matched"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_name_label_of_another_kind_elsewhere_is_not_collateral() {
+        // The old backwards-scan could walk from any occurrence of the quoted
+        // name to an unrelated block and delete that instead.
+        let (_d, path) = sch_with(
+            "  (global_label \"VBUS\"\n    (shape input)\n    (at 50 50 0)\n    (uuid \"33333333-3333-3333-3333-333333333333\")\n  )\n  (label \"VBUS\"\n    (at 150 150 0)\n    (uuid \"44444444-4444-4444-4444-444444444444\")\n  )",
+        );
+
+        let result = delete(&path, "VBUS", 150.0, 150.0).await;
+        assert!(!result.is_error);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("(global_label \"VBUS\""),
+            "the global label at a different position must survive"
+        );
+        assert!(!after.contains("(at 150 150 0)"));
+    }
+
+    #[tokio::test]
+    async fn global_and_hierarchical_labels_are_deletable_by_exact_position() {
+        for (kind, block) in [
+            (
+                "global_label",
+                "  (global_label \"NET\"\n    (shape input)\n    (at 10 20 0)\n    (uuid \"55555555-5555-5555-5555-555555555555\")\n  )",
+            ),
+            (
+                "hierarchical_label",
+                "  (hierarchical_label \"NET\"\n    (shape input)\n    (at 10 20 0)\n    (uuid \"66666666-6666-6666-6666-666666666666\")\n  )",
+            ),
+        ] {
+            let (_d, path) = sch_with(block);
+            let result = delete(&path, "NET", 10.0, 20.0).await;
+            assert!(!result.is_error, "{kind} should be deletable");
+            assert!(!std::fs::read_to_string(&path).unwrap().contains(kind));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_net_name_appearing_in_a_property_does_not_confuse_the_match() {
+        // "VCC" also occurs as a symbol property value; only the real label
+        // block at the requested position may be deleted.
+        let (_d, path) = sch_with(
+            "  (symbol\n    (lib_id \"Device:R\")\n    (at 60 60 0)\n    (property \"Value\" \"VCC\"\n      (at 60 62 0)\n    )\n  )\n  (label \"VCC\"\n    (at 100 100 0)\n    (uuid \"77777777-7777-7777-7777-777777777777\")\n  )",
+        );
+
+        let result = delete(&path, "VCC", 100.0, 100.0).await;
+        assert!(!result.is_error);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("(property \"Value\" \"VCC\""),
+            "the symbol property must be untouched"
+        );
+        assert!(!after.contains("(label \"VCC\""));
+    }
+
+    #[tokio::test]
+    async fn unknown_net_name_is_an_error() {
+        let (_d, path) = sch_with(TWO_PLAIN);
+        let result = delete(&path, "NOPE", 100.0, 100.0).await;
+        assert!(result.is_error);
+    }
+
+    // ─── justify / rotation ────────────────────────────────────────────────
+
+    async fn rotate(path: &std::path::Path, net: &str, x: f64, y: f64, rot: f64) -> CallToolResult {
+        handle_rotate_label(
+            &json!({ "schematic": path.display().to_string(), "net": net,
+                     "x": x, "y": y, "rotation": rot }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn justify_of(body: &str, net: &str) -> String {
+        let start = body.find(&format!("\"{net}\"")).expect("label present");
+        let block = &body[start..];
+        let end = block.find("(uuid").unwrap_or(block.len());
+        match block[..end].find("(justify ") {
+            Some(j) => {
+                let rest = &block[..end][j + "(justify ".len()..];
+                rest[..rest.find(')').unwrap()].trim().to_string()
+            }
+            None => "<none>".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rotate_creates_the_effects_block_when_absent() {
+        // The shape add_schematic_net_label used to write: no (effects) at all.
+        let (_d, path) = sch_with(
+            "  (global_label \"EN\"\n    (shape input)\n    (at 10 20 0)\n    (uuid \"88888888-8888-8888-8888-888888888888\")\n  )",
+        );
+        let result = rotate(&path, "EN", 10.0, 20.0, 180.0).await;
+        assert!(!result.is_error);
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("(at 10 20 180)"), "anchor must rotate");
+        assert_eq!(
+            justify_of(&body, "EN"),
+            "right",
+            "a 180° label must be right-justified or its text renders backwards"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_replaces_an_existing_justify_and_keeps_the_font() {
+        let (_d, path) = sch_with(
+            "  (global_label \"EN\"\n    (shape input)\n    (at 10 20 0)\n    (effects (font (size 2.54 2.54)) (justify left))\n    (uuid \"99999999-9999-9999-9999-999999999999\")\n  )",
+        );
+        assert!(!rotate(&path, "EN", 10.0, 20.0, 180.0).await.is_error);
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(justify_of(&body, "EN"), "right");
+        assert!(
+            body.contains("(size 2.54 2.54)"),
+            "the file's own font must be preserved"
+        );
+        assert_eq!(body.matches("(justify").count(), 1, "no duplicate justify");
+    }
+
+    #[tokio::test]
+    async fn rotate_adds_justify_to_an_effects_block_that_lacks_one() {
+        let (_d, path) = sch_with(
+            "  (global_label \"EN\"\n    (shape input)\n    (at 10 20 0)\n    (effects (font (size 1.27 1.27)))\n    (uuid \"aaaaaaaa-9999-9999-9999-999999999999\")\n  )",
+        );
+        assert!(!rotate(&path, "EN", 10.0, 20.0, 270.0).await.is_error);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(justify_of(&body, "EN"), "right", "270° is right-justified");
+        assert_eq!(body.matches("(effects").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn rotating_back_to_zero_restores_left() {
+        let (_d, path) = sch_with(
+            "  (global_label \"EN\"\n    (shape input)\n    (at 10 20 180)\n    (effects (font (size 1.27 1.27)) (justify right))\n    (uuid \"bbbbbbbb-9999-9999-9999-999999999999\")\n  )",
+        );
+        assert!(!rotate(&path, "EN", 10.0, 20.0, 0.0).await.is_error);
+        assert_eq!(
+            justify_of(&std::fs::read_to_string(&path).unwrap(), "EN"),
+            "left"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_labels_keep_the_bottom_alignment_eeschema_writes() {
+        let (_d, path) = sch_with(
+            "  (label \"MID\"\n    (at 10 20 0)\n    (uuid \"cccccccc-9999-9999-9999-999999999999\")\n  )",
+        );
+        assert!(!rotate(&path, "MID", 10.0, 20.0, 180.0).await.is_error);
+        assert_eq!(
+            justify_of(&std::fs::read_to_string(&path).unwrap(), "MID"),
+            "right bottom"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_reports_real_positions_when_coordinates_miss() {
+        let (_d, path) = sch_with(TWO_PLAIN);
+        let result = rotate(&path, "VCC", 555.0, 555.0, 180.0).await;
+        assert!(result.is_error, "must not rotate the nearest label instead");
+    }
 }

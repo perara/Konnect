@@ -50,7 +50,7 @@ Only to answer questions not available through exports (sheet hierarchy, title b
 | User Request | Channel | Tool / Action |
 |---|---|---|
 | "Review my schematic" | 2 | Load `sch_analysis` toolset, use analysis tools |
-| "Change R5 from 10k to 4.7k" | 1 | `load_toolset("sch_components")` then `edit_component` |
+| "Change R5 from 10k to 4.7k" | 1 | `load_toolset("sch_components")` then `edit_schematic_component` |
 | "What's connected to SCL?" | 2 | `load_toolset("sch_analysis")` then `get_net_connections` |
 | "Add a 100nF cap to U3 VCC" | 1 | `load_toolset("sch_components")` + `load_toolset("sch_wiring")` |
 | "Rename net /CLK to /SYS_CLK" | 1 | Warn about downstream effects, then MCP tools |
@@ -72,7 +72,7 @@ Only to answer questions not available through exports (sheet hierarchy, title b
 
 ## Discovery — Finding Available Tools
 
-Konnect uses a meta-tool router pattern with 185 toolset tools across 18 toolsets, plus 6 always-visible meta-tools (191 total). Toolsets are loaded on demand to keep the context focused.
+Konnect uses a meta-tool router pattern with 185 tools across 18 toolsets. Tools are loaded on demand to keep the context focused.
 
 ```
 list_toolboxes          → See all available toolsets with descriptions
@@ -85,12 +85,15 @@ unload_toolset(<toolset>) → Remove a toolset when done
 
 | Category | Toolsets |
 |----------|----------|
+| Project | project |
 | Schematic | sch_components, sch_wiring, sch_analysis, sch_batch, sch_export, sch_hierarchy |
 | PCB | pcb_board, pcb_components, pcb_routing, pcb_export |
-| Verification | verification, design_review |
-| Libraries and sourcing | library, integration, templates |
-| Project | project, config |
-| Production | manufacturing |
+| Library | library |
+| Integration | integration (JLCPCB parts, Freerouting, datasheets) |
+| Verification & Review | verification, design_review |
+| Config | config |
+| Templates | templates |
+| Manufacturing | manufacturing |
 
 ## Design Rules Quick Reference
 
@@ -120,7 +123,7 @@ unload_toolset(<toolset>) → Remove a toolset when done
 2. load_toolset("sch_components")          → activate component tools
 3. add_schematic_component (repeat)        → place parts
 4. load_toolset("sch_wiring")              → activate wiring tools
-5. connect_pins / add_wire / add_net_label → wire the circuit
+5. connect_pins / add_wire / add_schematic_net_label → wire the circuit
 6. load_toolset("verification")            → activate checks
 7. run_erc / run_design_review             → validate the design
 ```

@@ -6,12 +6,15 @@
 
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
-use crate::tools::{get_path, opt_f64, opt_str, require_f64, require_str, ToolContext, ToolDef};
+use crate::tools::{
+    find_symbol_instance_block, get_path, opt_f64, opt_str, project_name_for, require_f64,
+    require_str, ToolContext, ToolDef,
+};
 use konnect_schematic_editor as cse;
 use konnect_sexp::{
     geometry::snap_point,
     schematic::{extract_lib_pins, extract_symbol_instances, pin_endpoint, read_schematic},
-    writer::{apply_edits, find_block_with_leading_whitespace, new_uuid, write_atomic, SexpEdit},
+    writer::{apply_edits, new_uuid, write_atomic, SexpEdit},
 };
 use serde_json::json;
 
@@ -42,7 +45,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "y": { "type": "number", "description": "Y position in mm" },
                     "rotation": { "type": "number", "description": "Rotation in degrees (0/90/180/270)", "default": 0 },
                     "reference": { "type": "string", "description": "Optional override for reference designator" },
-                    "value": { "type": "string", "description": "Optional override for value field" }
+                    "value": { "type": "string", "description": "Optional override for value field" },
+                    "unit": { "type": "integer", "description": "Unit number for multi-unit symbols (gate/part selection). Default 1.", "default": 1 }
                 },
                 "required": ["schematic", "lib_id", "x", "y"]
             }),
@@ -282,11 +286,11 @@ async fn handle_create_schematic(
     _ctx: &ToolContext,
 ) -> anyhow::Result<CallToolResult> {
     let path = get_path(args, "path")?;
-    // Build a minimal valid schematic and save via cse's atomic writer
-    let template = "(kicad_sch\n\t(version 20250610)\n\t(generator \"konnect\")\n\t(generator_version \"10.0\")\n\t(paper \"A4\")\n\t(lib_symbols\n\t)\n)\n";
+    // Build a minimal valid schematic and save via cse's atomic writer.
+    let template = crate::tools::blank_schematic_template();
     // Write the template then immediately load/save through cse so the file
     // is normalised to cse's writer output format.
-    write_atomic(&path, template)?;
+    write_atomic(&path, &template)?;
     let sch = cse::Schematic::load(&path)?;
     sch.overwrite()?;
     Ok(CallToolResult::json(
@@ -314,6 +318,7 @@ async fn handle_add_schematic_component(
     let rotation = opt_f64(args, "rotation").unwrap_or(0.0);
     let reference = opt_str(args, "reference");
     let value = opt_str(args, "value");
+    let unit = opt_f64(args, "unit").unwrap_or(1.0) as u32;
 
     // Snap to 1.27mm grid
     let (x, y) = snap_point(x, y, 1.27);
@@ -324,12 +329,21 @@ async fn handle_add_schematic_component(
     // Load via konnect-schematic-editor
     let mut sch = cse::Schematic::load(&sch_path)?;
 
+    // The instance path below must be "/<root-uuid>" — KiCAD's netlister
+    // resolves instances against the root sheet UUID and silently forms no
+    // wire-only nets for symbols whose path doesn't resolve.
+    let root_uuid = crate::tools::ensure_root_uuid(&mut sch);
+    let project_name = project_name_for(&sch_path);
+
     // Embed the library symbol definition
-    cse::library::ensure_lib_symbol(&mut sch, &lib_id)?;
+    if !cse::library::ensure_lib_symbol(&mut sch, &lib_id) {
+        return Ok(crate::tools::lib_symbol_not_found_error(&lib_id));
+    }
 
     // Build the Symbol struct
     let mut sym = cse::Symbol::new(&lib_id, x, y);
     sym.at.rotation = Some(rotation);
+    sym.unit = unit;
 
     // Helper: build an effects sub-node  (font (size 1.27 1.27))  with optional (hide yes)
     let effects_node = |hide: bool| -> cse::sexp::SexpNode {
@@ -389,24 +403,9 @@ async fn handle_add_schematic_component(
     ds_prop.sub_nodes.push(effects_node(true));
     sym.properties.push(ds_prop);
 
-    // Instances node
-    let instances = cse::sexp::SexpNode::List(vec![
-        cse::sexp::atom("instances"),
-        cse::sexp::SexpNode::List(vec![
-            cse::sexp::atom("project"),
-            cse::sexp::qstr(""),
-            cse::sexp::SexpNode::List(vec![
-                cse::sexp::atom("path"),
-                cse::sexp::qstr("/"),
-                cse::sexp::SexpNode::List(vec![
-                    cse::sexp::atom("reference"),
-                    cse::sexp::qstr(ref_str),
-                ]),
-                cse::sexp::SexpNode::List(vec![cse::sexp::atom("unit"), cse::sexp::atom("1")]),
-            ]),
-        ]),
-    ]);
-    sym.raw_sub_nodes.push(instances);
+    // Instance entry, keyed to the root sheet UUID like eeschema writes it:
+    // (instances (project "<name>" (path "/<root-uuid>" (reference ...) (unit 1))))
+    sym.set_instance_path(&project_name, &format!("/{}", root_uuid), ref_str, unit);
 
     let uuid = sym.uuid.clone();
     sch.add_symbol(sym);
@@ -417,6 +416,7 @@ async fn handle_add_schematic_component(
         "reference": ref_str,
         "value": val_str,
         "x": x, "y": y,
+        "unit": unit,
         "uuid": uuid
     })))
 }
@@ -458,83 +458,78 @@ async fn handle_edit_schematic_component(
     let mut content = std::fs::read_to_string(&sch_path)?;
     let mut changed = Vec::new();
 
-    // Helper: update a property field value in-place
-    let update_field = |content: &str, ref_: &str, field: &str, new_val: &str| -> (String, bool) {
-        // Pattern: (property "FieldName" "OldValue"
-        //           surrounded by the enclosing symbol block for 'ref_'
-        // Simple approach: find the reference location, then within that symbol block
-        // update the named property.
-        let ref_search = format!(r#"(property "Reference" "{ref_}""#);
-        let ref_pos = match content.find(&ref_search) {
-            Some(p) => p,
-            None => return (content.to_string(), false),
+    // Helper: update a property field value in-place within the symbol block
+    // for `ref_`. Returns the reason on failure so the caller can report it
+    // instead of silently claiming success.
+    let update_field =
+        |content: &str, ref_: &str, field: &str, new_val: &str| -> Result<String, String> {
+            let (sym_start, sym_end) = find_symbol_instance_block(content, ref_)
+                .ok_or_else(|| format!("symbol '{ref_}' not found in this schematic"))?;
+            let sym_block = &content[sym_start..sym_end];
+            let field_search = format!(r#"(property "{field}" ""#);
+            let field_offset = sym_block
+                .find(&field_search)
+                .map(|o| sym_start + o + field_search.len())
+                .ok_or_else(|| format!("'{ref_}' has no '{field}' property"))?;
+            // Find the closing quote of the current value
+            let val_end = content[field_offset..]
+                .find('"')
+                .map(|o| field_offset + o)
+                .ok_or_else(|| format!("'{field}' property on '{ref_}' is malformed"))?;
+            Ok(format!(
+                "{}{}{}",
+                &content[..field_offset],
+                new_val,
+                &content[val_end..]
+            ))
         };
-        // Find the symbol block around this reference
-        let sym_start_str = "\n  (symbol";
-        let before = &content[..ref_pos];
-        let sym_start = match before.rfind(sym_start_str) {
-            Some(p) => p + 1,
-            None => return (content.to_string(), false),
-        };
-        let (_, sym_end) = match find_block_with_leading_whitespace(content, sym_start) {
-            Some(r) => r,
-            None => return (content.to_string(), false),
-        };
-        let sym_block = &content[sym_start..sym_end];
-        let field_search = format!(r#"(property "{field}" ""#);
-        let field_offset = match sym_block.find(&field_search) {
-            Some(o) => sym_start + o + field_search.len(),
-            None => return (content.to_string(), false),
-        };
-        // Find the closing quote of the current value
-        let val_end = match content[field_offset..].find('"') {
-            Some(o) => field_offset + o,
-            None => return (content.to_string(), false),
-        };
-        let new_content = format!(
-            "{}{}{}",
-            &content[..field_offset],
-            new_val,
-            &content[val_end..]
-        );
-        (new_content, true)
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut apply = |content: &mut String, field: &str, new_val: &str| match update_field(
+        content, &reference, field, new_val,
+    ) {
+        Ok(updated) => {
+            *content = updated;
+            changed.push(format!("{} → {}", field, new_val));
+        }
+        Err(why) => errors.push(format!("{field}: {why}")),
     };
 
     if let Some(new_ref) = opt_str(args, "new_reference") {
-        let (c, ok) = update_field(&content, &reference, "Reference", new_ref);
-        if ok {
-            content = c;
-            changed.push(format!("Reference → {}", new_ref));
-        }
+        apply(&mut content, "Reference", new_ref);
     }
     if let Some(val) = opt_str(args, "value") {
-        let (c, ok) = update_field(&content, &reference, "Value", val);
-        if ok {
-            content = c;
-            changed.push(format!("Value → {}", val));
-        }
+        apply(&mut content, "Value", val);
     }
     if let Some(fp) = opt_str(args, "footprint") {
-        let (c, ok) = update_field(&content, &reference, "Footprint", fp);
-        if ok {
-            content = c;
-            changed.push(format!("Footprint → {}", fp));
-        }
+        apply(&mut content, "Footprint", fp);
     }
     if let Some(ds) = opt_str(args, "datasheet") {
-        let (c, ok) = update_field(&content, &reference, "Datasheet", ds);
-        if ok {
-            content = c;
-            changed.push(format!("Datasheet → {}", ds));
-        }
+        apply(&mut content, "Datasheet", ds);
     }
 
-    write_atomic(&sch_path, &content)?;
+    // A request that changed nothing is a failure, not a success — silently
+    // reporting `"changes": []` is what let the tab-indentation bug hide.
+    if changed.is_empty() && !errors.is_empty() {
+        return Ok(CallToolResult::error(format!(
+            "No fields were updated on '{}': {}",
+            reference,
+            errors.join("; ")
+        )));
+    }
 
-    Ok(CallToolResult::json(&json!({
+    if !changed.is_empty() {
+        write_atomic(&sch_path, &content)?;
+    }
+
+    let mut result = json!({
         "reference": reference,
         "changes": changed
-    })))
+    });
+    if !errors.is_empty() {
+        result["errors"] = json!(errors);
+    }
+    Ok(CallToolResult::json(&result))
 }
 
 async fn handle_get_schematic_component(
@@ -775,24 +770,33 @@ async fn handle_get_schematic_pin_locations(
         .iter()
         .find(|n| n.get(1).and_then(|c| c.as_str()) == Some(&inst.lib_id));
 
-    let pins: Vec<serde_json::Value> = if let Some(sym) = lib_sym {
-        let lib_pins = extract_lib_pins(sym);
-        let t = inst.pin_transform();
-        lib_pins
-            .iter()
-            .map(|p| {
-                let (sx, sy) = pin_endpoint(p, t);
-                json!({
-                    "number": p.number,
-                    "name": p.name,
-                    "x": sx,
-                    "y": sy
-                })
-            })
-            .collect()
-    } else {
-        Vec::new()
+    // A missing embedded definition is an error, not an empty pin list —
+    // silently returning [] hid every bad-lib_id component until wiring or
+    // netlisting failed much later (#34).
+    let Some(sym) = lib_sym else {
+        return Ok(CallToolResult::error(format!(
+            "Component '{}' has no embedded definition for '{}' in this \
+             schematic's lib_symbols — it was likely added with a lib_id that \
+             doesn't exist in the installed libraries, so it is invisible to \
+             KiCAD's netlister. Re-add it with a valid lib_id \
+             (delete_schematic_component + add_schematic_component).",
+            reference, inst.lib_id
+        )));
     };
+    let lib_pins = extract_lib_pins(sym);
+    let t = inst.pin_transform();
+    let pins: Vec<serde_json::Value> = lib_pins
+        .iter()
+        .map(|p| {
+            let (sx, sy) = pin_endpoint(p, t);
+            json!({
+                "number": p.number,
+                "name": p.name,
+                "x": sx,
+                "y": sy
+            })
+        })
+        .collect();
 
     Ok(CallToolResult::json(&json!({
         "reference": reference,
@@ -834,18 +838,25 @@ async fn handle_batch_get_pin_locations(
             let lib_sym = lib_syms
                 .iter()
                 .find(|n| n.get(1).and_then(|c| c.as_str()) == Some(&inst.lib_id));
-            let pins: Vec<serde_json::Value> = if let Some(sym) = lib_sym {
-                let t = inst.pin_transform();
-                extract_lib_pins(sym)
-                    .iter()
-                    .map(|p| {
-                        let (sx, sy) = pin_endpoint(p, t);
-                        json!({ "number": p.number, "name": p.name, "x": sx, "y": sy })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
+            // Per-entry error rather than a silent empty pin list (#34).
+            let Some(sym) = lib_sym else {
+                return json!({
+                    "reference": reference,
+                    "error": format!(
+                        "no embedded definition for '{}' in lib_symbols — \
+                         likely added with a nonexistent lib_id",
+                        inst.lib_id
+                    )
+                });
             };
+            let t = inst.pin_transform();
+            let pins: Vec<serde_json::Value> = extract_lib_pins(sym)
+                .iter()
+                .map(|p| {
+                    let (sx, sy) = pin_endpoint(p, t);
+                    json!({ "number": p.number, "name": p.name, "x": sx, "y": sy })
+                })
+                .collect();
             json!({ "reference": reference, "x": inst.x, "y": inst.y, "pins": pins })
         })
         .collect();
@@ -899,25 +910,14 @@ async fn handle_add_component_annotation(
     let content = std::fs::read_to_string(&sch_path)?;
 
     // Find the symbol block for this reference
-    let ref_search = format!(r#"(property "Reference" "{reference}""#);
-    let ref_pos = match content.find(&ref_search) {
-        Some(o) => o,
+    let (sym_start, sym_end) = match find_symbol_instance_block(&content, &reference) {
+        Some(r) => r,
         None => {
             return Ok(CallToolResult::error(format!(
                 "Component '{}' not found",
                 reference
             )))
         }
-    };
-
-    let before = &content[..ref_pos];
-    let sym_start = match before.rfind("\n  (symbol") {
-        Some(o) => o + 1,
-        None => return Ok(CallToolResult::error("Could not find symbol block")),
-    };
-    let (_, sym_end) = match find_block_with_leading_whitespace(&content, sym_start) {
-        Some(r) => r,
-        None => return Ok(CallToolResult::error("Could not parse symbol block")),
     };
 
     // Find the position just before (instances in the symbol block, or before closing paren
@@ -968,18 +968,7 @@ async fn handle_group_components(
     let mut grouped = Vec::new();
 
     for reference in &refs {
-        let ref_search = format!(r#"(property "Reference" "{reference}""#);
-        let ref_pos = match content.find(&ref_search) {
-            Some(o) => o,
-            None => continue,
-        };
-
-        let before = &content[..ref_pos];
-        let sym_start = match before.rfind("\n  (symbol") {
-            Some(o) => o + 1,
-            None => continue,
-        };
-        let (_, sym_end) = match find_block_with_leading_whitespace(&content, sym_start) {
+        let (sym_start, sym_end) = match find_symbol_instance_block(&content, reference) {
             Some(r) => r,
             None => continue,
         };
@@ -1024,9 +1013,8 @@ async fn handle_replace_component(
     let mut content = std::fs::read_to_string(&sch_path)?;
 
     // Find the symbol block for this reference
-    let ref_search = format!(r#"(property "Reference" "{reference}""#);
-    let ref_pos = match content.find(&ref_search) {
-        Some(o) => o,
+    let (sym_start, sym_end) = match find_symbol_instance_block(&content, &reference) {
+        Some(r) => r,
         None => {
             return Ok(CallToolResult::error(format!(
                 "Component '{}' not found",
@@ -1035,16 +1023,11 @@ async fn handle_replace_component(
         }
     };
 
-    let before = &content[..ref_pos];
-    let sym_start = match before.rfind("\n  (symbol") {
-        Some(o) => o + 1,
-        None => return Ok(CallToolResult::error("Could not find symbol block")),
-    };
-
-    // Find the (lib_id "OLD") and replace it
-    let sym_block_start = &content[sym_start..];
+    // Find the (lib_id "OLD") and replace it — searching only within this
+    // symbol's block, so a malformed instance can't reach into the next one.
+    let sym_block = &content[sym_start..sym_end];
     let lib_id_pat = "(lib_id \"";
-    let lib_id_rel = match sym_block_start.find(lib_id_pat) {
+    let lib_id_rel = match sym_block.find(lib_id_pat) {
         Some(o) => o,
         None => {
             return Ok(CallToolResult::error(
@@ -1070,8 +1053,12 @@ async fn handle_replace_component(
     );
     content = new_content;
 
-    // Ensure the new library symbol definition is present
-    super::ensure_lib_symbol_in_schematic(&mut content, &new_lib_id);
+    // Ensure the new library symbol definition is present. Bail BEFORE writing:
+    // a replace that can't embed its definition would leave the component
+    // netlist-invisible (#34).
+    if !super::ensure_lib_symbol_in_schematic(&mut content, &new_lib_id) {
+        return Ok(crate::tools::lib_symbol_not_found_error(&new_lib_id));
+    }
     write_atomic(&sch_path, &content)?;
 
     Ok(CallToolResult::json(&json!({
@@ -1082,3 +1069,263 @@ async fn handle_replace_component(
 }
 
 // Library symbol resolution moved to tools/mod.rs (shared with sch_wiring.rs)
+
+#[cfg(test)]
+// These tests intentionally hold a process-wide environment-variable lock
+// across async handler calls so parallel tests cannot observe a different
+// KiCAD symbol directory.
+#[allow(clippy::await_holding_lock)]
+mod tests {
+    use super::*;
+    use crate::router::ToolRouter;
+    use crate::tools::ServerConfig;
+    use std::sync::Arc;
+
+    fn test_ctx() -> ToolContext {
+        ToolContext::new(
+            ServerConfig {
+                kicad_cli: String::new(),
+                kicad_binary: String::new(),
+                ipc_address: String::new(),
+                project_dir: None,
+                jlcpcb_db_path: None,
+            },
+            Arc::new(ToolRouter::new()),
+        )
+    }
+
+    /// Serializes tests that set KICAD10_SYMBOL_DIR (process-wide env).
+    static SYMBOL_DIR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A stub symbol library so component adds resolve without an installed
+    /// KiCAD (CI has none): Device:R and Device:C_Polarized in the KiCAD 10
+    /// symdir layout. Returns (tempdir guard, env lock).
+    fn stub_symbol_dir() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = SYMBOL_DIR_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let symdir = dir.path().join("Device.kicad_symdir");
+        std::fs::create_dir_all(&symdir).unwrap();
+        let symbol = |name: &str| {
+            format!(
+                "(kicad_symbol_lib\n\t(version 20241209)\n\t(generator \"test\")\n\t(symbol \"{name}\"\n\t\t(property \"Reference\" \"R\" (at 0 0 0))\n\t\t(property \"Value\" \"{name}\" (at 0 0 0))\n\t\t(symbol \"{name}_0_1\"\n\t\t\t(pin passive line (at 0 3.81 270) (length 1.27)\n\t\t\t\t(name \"~\" (effects (font (size 1.27 1.27))))\n\t\t\t\t(number \"1\" (effects (font (size 1.27 1.27))))\n\t\t\t)\n\t\t\t(pin passive line (at 0 -3.81 90) (length 1.27)\n\t\t\t\t(name \"~\" (effects (font (size 1.27 1.27))))\n\t\t\t\t(number \"2\" (effects (font (size 1.27 1.27))))\n\t\t\t)\n\t\t)\n\t)\n)\n"
+            )
+        };
+        std::fs::write(symdir.join("R.kicad_sym"), symbol("R")).unwrap();
+        std::fs::write(symdir.join("C_Polarized.kicad_sym"), symbol("C_Polarized")).unwrap();
+        std::env::set_var("KICAD10_SYMBOL_DIR", dir.path());
+        (dir, guard)
+    }
+
+    #[tokio::test]
+    async fn create_schematic_writes_root_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.kicad_sch");
+        let ctx = test_ctx();
+
+        let result = handle_create_schematic(&json!({ "path": path.display().to_string() }), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+
+        let sch = cse::Schematic::load(&path).unwrap();
+        assert!(
+            sch.uuid.is_some(),
+            "root (uuid ...) is required for KiCAD's netlister to resolve instance paths"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_component_writes_eeschema_style_instance_path() {
+        let (_symdir, _env) = stub_symbol_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("amp.kicad_sch");
+        let ctx = test_ctx();
+
+        handle_create_schematic(&json!({ "path": path.display().to_string() }), &ctx)
+            .await
+            .unwrap();
+        let result = handle_add_schematic_component(
+            &json!({
+                "schematic": path.display().to_string(),
+                "lib_id": "Device:R",
+                "x": 100.0, "y": 80.0,
+                "reference": "R1"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+
+        let sch = cse::Schematic::load(&path).unwrap();
+        let root_uuid = sch.uuid.clone().expect("root uuid present");
+        let sym = sch.symbols.by_reference("R1").unwrap();
+        // KiCAD only forms wire-only nets when the instance path is exactly
+        // "/<root-uuid>"; the project key mirrors eeschema (file stem).
+        assert!(
+            sym.has_instance_path("amp", &format!("/{}", root_uuid)),
+            "instance path must be /<root-uuid> under the file-stem project name"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_component_writes_requested_unit() {
+        let (_symdir, _env) = stub_symbol_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.kicad_sch");
+        let ctx = test_ctx();
+
+        handle_create_schematic(&json!({ "path": path.display().to_string() }), &ctx)
+            .await
+            .unwrap();
+        let result = handle_add_schematic_component(
+            &json!({
+                "schematic": path.display().to_string(),
+                "lib_id": "Device:R",
+                "x": 100.0, "y": 80.0,
+                "reference": "U1",
+                "unit": 3
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+
+        let sch = cse::Schematic::load(&path).unwrap();
+        let sym = sch.symbols.by_reference("U1").unwrap();
+        assert_eq!(sym.unit, 3, "symbol (unit N) must match the requested unit");
+        let root_uuid = sch.uuid.clone().unwrap();
+        // Instance entry must carry the same unit, not a hardcoded 1.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(&format!("/{}", root_uuid)));
+        assert!(raw.contains("(unit 3)"), "instance unit must be 3");
+    }
+
+    #[tokio::test]
+    async fn add_component_repairs_legacy_file_without_root_uuid() {
+        let (_symdir, _env) = stub_symbol_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.kicad_sch");
+        // File shape produced by Konnect before root UUIDs were written.
+        std::fs::write(
+            &path,
+            "(kicad_sch\n\t(version 20250610)\n\t(generator \"konnect\")\n\t(generator_version \"10.0\")\n\t(paper \"A4\")\n\t(lib_symbols\n\t)\n)\n",
+        )
+        .unwrap();
+        let ctx = test_ctx();
+
+        let result = handle_add_schematic_component(
+            &json!({
+                "schematic": path.display().to_string(),
+                "lib_id": "Device:R",
+                "x": 50.0, "y": 50.0,
+                "reference": "R1"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+
+        let sch = cse::Schematic::load(&path).unwrap();
+        let root_uuid = sch.uuid.clone().expect("legacy file gains a root uuid");
+        let sym = sch.symbols.by_reference("R1").unwrap();
+        assert!(sym.has_instance_path("legacy", &format!("/{}", root_uuid)));
+    }
+
+    #[tokio::test]
+    async fn add_component_with_nonexistent_lib_id_errors_with_suggestion() {
+        let (_symdir, _env) = stub_symbol_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ghost.kicad_sch");
+        let ctx = test_ctx();
+
+        handle_create_schematic(&json!({ "path": path.display().to_string() }), &ctx)
+            .await
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // Device:CP is the KiCAD ≤9 name; 10 renamed it to C_Polarized (#34).
+        let result = handle_add_schematic_component(
+            &json!({
+                "schematic": path.display().to_string(),
+                "lib_id": "Device:CP",
+                "x": 100.0, "y": 80.0,
+                "reference": "C1"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_error, "nonexistent lib_id must be an error");
+        let msg = format!("{:?}", result.content);
+        assert!(msg.contains("Device:CP"), "names the bad lib_id: {msg}");
+        assert!(
+            msg.contains("C_Polarized"),
+            "did-you-mean should surface the rename: {msg}"
+        );
+
+        // And nothing was written: no ghost instance in the file.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn add_component_with_unknown_library_says_so() {
+        let (_symdir, _env) = stub_symbol_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nolib.kicad_sch");
+        let ctx = test_ctx();
+
+        handle_create_schematic(&json!({ "path": path.display().to_string() }), &ctx)
+            .await
+            .unwrap();
+        let result = handle_add_schematic_component(
+            &json!({
+                "schematic": path.display().to_string(),
+                "lib_id": "Transistor_FET_xyzzy:IRF830",
+                "x": 100.0, "y": 80.0
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_error);
+        let msg = format!("{:?}", result.content);
+        assert!(
+            msg.contains("Library 'Transistor_FET_xyzzy' not found"),
+            "distinguishes missing library from missing symbol: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_locations_error_when_definition_not_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noembed.kicad_sch");
+        // A symbol instance whose lib_id has NO lib_symbols entry — the file
+        // shape a ghost lib_id used to leave behind (#34).
+        std::fs::write(
+            &path,
+            "(kicad_sch\n\t(version 20250610)\n\t(generator \"konnect\")\n\t(uuid \"11111111-2222-3333-4444-555555555555\")\n\t(lib_symbols\n\t)\n\t(symbol\n\t\t(lib_id \"Device:CP\")\n\t\t(at 100 80 0)\n\t\t(unit 1)\n\t\t(uuid \"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\")\n\t\t(property \"Reference\" \"C1\"\n\t\t\t(at 102 78 0)\n\t\t)\n\t)\n)\n",
+        )
+        .unwrap();
+        let ctx = test_ctx();
+
+        let result = handle_get_schematic_pin_locations(
+            &json!({
+                "schematic": path.display().to_string(),
+                "reference": "C1"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.is_error,
+            "missing embedded definition must be an error, not pins: []"
+        );
+        let msg = format!("{:?}", result.content);
+        assert!(msg.contains("Device:CP"));
+        assert!(msg.contains("no embedded definition"));
+    }
+}

@@ -496,7 +496,9 @@ async fn handle_apply_template(
             *counter += 1;
 
             let (x, y) = snap_point(base_x, base_y + (placed.len() as f64) * spacing_y, 1.27);
-            cse::library::ensure_lib_symbol(&mut sch, lib_id)?;
+            if !cse::library::ensure_lib_symbol(&mut sch, lib_id) {
+                return Ok(crate::tools::lib_symbol_not_found_error(lib_id));
+            }
 
             let mut symbol = cse::Symbol::new(lib_id, x, y);
             symbol.at.rotation = Some(0.0);

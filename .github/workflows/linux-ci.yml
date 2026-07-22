@@ -96,12 +96,12 @@ jobs:
             --viewer crates/schematic-viewer/target/release/schematic-viewer \
             --out dist
           python3 packaging/validate-pcm.py \
-            --zip dist/konnect-pcm-linux-v0.0.0.zip --platform linux
+            --zip dist/konnect-pcm-v0.0.0-linux.zip --platform linux
 
           install_root="${RUNNER_TEMP:-/tmp}/konnect-pcm-install"
           rm -rf "$install_root"
           mkdir -p "$install_root"
-          unzip -q dist/konnect-pcm-linux-v0.0.0.zip -d "$install_root"
+          unzip -q dist/konnect-pcm-v0.0.0-linux.zip -d "$install_root"
           test -x "$install_root/plugins/bin/konnect"
           test -x "$install_root/plugins/bin/schematic-viewer"
           "$install_root/plugins/bin/konnect" --version | grep -q '^konnect '

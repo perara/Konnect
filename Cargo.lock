@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "konnect"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "konnect-core"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "konnect-ipc"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "konnect-sexp",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "konnect-schematic-editor"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "konnect-sexp",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "konnect-sexp"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nom",

@@ -11,7 +11,7 @@
 use crate::manifest::{AGENTS, HOOK_SKILLS, SKILLS};
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -454,9 +454,9 @@ pub fn detect_kicad() -> Option<PathBuf> {
     }
 
     for path_str in kicad_cli_candidates() {
-        let path = Path::new(path_str);
+        let path = PathBuf::from(path_str);
         if path.is_file() {
-            return Some(path.to_path_buf());
+            return Some(path);
         }
     }
 
@@ -533,7 +533,9 @@ fn detect_kicad_from_registry() -> Option<PathBuf> {
         for line in stdout.lines() {
             if line.contains("REG_SZ") {
                 let path_str = line.split("REG_SZ").last()?.trim();
-                let cli_path = Path::new(path_str).join("bin").join("kicad-cli.exe");
+                let cli_path = std::path::Path::new(path_str)
+                    .join("bin")
+                    .join("kicad-cli.exe");
                 if cli_path.exists() {
                     return Some(cli_path);
                 }

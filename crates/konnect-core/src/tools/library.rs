@@ -40,6 +40,21 @@ pub fn tools() -> Vec<ToolDef> {
                             },
                             "required": ["number", "type", "shape", "x", "y", "width", "height"]
                         }
+                    },
+                    "body_width": { "type": "number", "description": "Physical component body width in mm (optional; used for silk/fab outlines). Falls back to the pad envelope if omitted." },
+                    "body_height": { "type": "number", "description": "Physical component body height in mm (optional)." },
+                    "package_type": { "type": "string", "description": "'smd' (0.25mm courtyard), 'through_hole' (0.5mm), 'small' (0.15mm, <0603), or 'bga' (1.0mm). Sets courtyard clearance when courtyard_clearance is not given." },
+                    "courtyard_clearance": { "type": "number", "description": "Explicit courtyard clearance in mm (overrides package_type / auto-detection)." },
+                    "model": {
+                        "type": "object",
+                        "description": "Optional 3D model to associate with the footprint.",
+                        "properties": {
+                            "path": { "type": "string", "description": "Path to the 3D model file (.step/.wrl); absolute or a KiCAD env-var path like ${KICAD9_3DMODEL_DIR}/..." },
+                            "offset": { "type": "object", "description": "{x,y,z} in mm (default 0,0,0)" },
+                            "scale": { "type": "object", "description": "{x,y,z} (default 1,1,1)" },
+                            "rotate": { "type": "object", "description": "{x,y,z} in degrees (default 0,0,0)" }
+                        },
+                        "required": ["path"]
                     }
                 },
                 "required": ["output", "name", "pads"]
@@ -103,7 +118,10 @@ pub fn tools() -> Vec<ToolDef> {
         ),
         tool!(
             "create_symbol",
-            "Create a new KiCAD schematic symbol and append it to a .kicad_sym library file.",
+            "Create a new KiCAD schematic symbol and append it to a .kicad_sym library file. \
+             Supports single-unit symbols (via `pins`) and multi-unit parts like dual/quad \
+             op-amps or gate banks (via `units` + optional `common_pins`). Each unit gets a \
+             rectangular body sized to its pins.",
             json!({
                 "type": "object",
                 "properties": {
@@ -127,9 +145,55 @@ pub fn tools() -> Vec<ToolDef> {
                             },
                             "required": ["number", "name", "type", "x", "y"]
                         }
+                    },
+                    "show_pin_names": { "type": "boolean", "description": "Show pin names on the symbol (default true).", "default": true },
+                    "show_pin_numbers": { "type": "boolean", "description": "Show pin numbers on the symbol (default true).", "default": true },
+                    "units": {
+                        "type": "array",
+                        "description": "For MULTI-UNIT parts (dual/quad op-amps, gate banks, multi-bank connectors). Each element is one unit (becomes Unit A, B, C...) with its own pins and its own rectangular body. When given, `units` replaces `pins` (use `pins` for single-unit symbols instead). Each unit's pins use the same shape as `pins`.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pins": {
+                                    "type": "array",
+                                    "description": "Pins for this unit",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "number": { "type": "string" },
+                                            "name": { "type": "string" },
+                                            "type": { "type": "string", "description": "'input', 'output', 'bidirectional', 'power_in', 'power_out', 'passive'" },
+                                            "x": { "type": "number" },
+                                            "y": { "type": "number" },
+                                            "angle": { "type": "number", "default": 0 },
+                                            "length": { "type": "number", "default": 2.54 }
+                                        },
+                                        "required": ["number", "name", "type", "x", "y"]
+                                    }
+                                }
+                            },
+                            "required": ["pins"]
+                        }
+                    },
+                    "power_pins": {
+                        "type": "array",
+                        "description": "Shared power pins (V+/V-, VCC/GND). Only meaningful with `units`: they become a dedicated final 'power unit' (e.g. Unit C of a dual op-amp, Unit E of a quad gate) placed once, following KiCAD's own 74xx convention. This avoids drawing the power pins on every unit (which would each need wiring to pass ERC). Same shape as `pins`.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "number": { "type": "string" },
+                                "name": { "type": "string" },
+                                "type": { "type": "string" },
+                                "x": { "type": "number" },
+                                "y": { "type": "number" },
+                                "angle": { "type": "number", "default": 0 },
+                                "length": { "type": "number", "default": 2.54 }
+                            },
+                            "required": ["number", "name", "type", "x", "y"]
+                        }
                     }
                 },
-                "required": ["library_path", "name", "reference_prefix", "pins"]
+                "required": ["library_path", "name", "reference_prefix"]
             }),
             |args, ctx| async move { handle_create_symbol(args, ctx).await }
         ),
@@ -261,6 +325,279 @@ pub fn tools() -> Vec<ToolDef> {
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
+// ─── Footprint / symbol geometry (pure, unit-tested) ──────────────────────────
+
+/// Minimal pad geometry needed to derive outlines, courtyards, and pin 1.
+#[derive(Debug, Clone)]
+struct PadGeom {
+    number: String,
+    pad_type: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+/// Axis-aligned bounding box `(min_x, min_y, max_x, max_y)` over pad extents.
+fn pads_bbox(pads: &[PadGeom]) -> (f64, f64, f64, f64) {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for p in pads {
+        min_x = min_x.min(p.x - p.w / 2.0);
+        min_y = min_y.min(p.y - p.h / 2.0);
+        max_x = max_x.max(p.x + p.w / 2.0);
+        max_y = max_y.max(p.y + p.h / 2.0);
+    }
+    (min_x, min_y, max_x, max_y)
+}
+
+/// Courtyard clearance per the contributor's rule: an explicit value wins, else
+/// `package_type`, else auto-detect (through-hole 0.5 mm, sub-0603 body 0.15 mm,
+/// otherwise SMT 0.25 mm). BGA (1.0 mm) is opt-in via `package_type` because an
+/// area array can't be reliably auto-detected from pads alone.
+fn courtyard_clearance(
+    explicit: Option<f64>,
+    package_type: Option<&str>,
+    pads: &[PadGeom],
+    body: Option<(f64, f64)>,
+) -> f64 {
+    if let Some(c) = explicit {
+        return c;
+    }
+    match package_type {
+        Some("bga") => return 1.0,
+        Some("small") => return 0.15,
+        Some("through_hole") | Some("th") => return 0.5,
+        Some("smd") => return 0.25,
+        _ => {}
+    }
+    if pads.iter().any(|p| p.pad_type.contains("thru")) {
+        return 0.5;
+    }
+    if let Some((bw, bh)) = body {
+        // 0603 imperial body is 1.6 x 0.8 mm; anything shorter is "smaller".
+        if bw.max(bh) < 1.6 {
+            return 0.15;
+        }
+    }
+    0.25
+}
+
+/// Index of pin 1: the pad numbered "1", else the first pad. `None` if no pads.
+fn pin1_index(pads: &[PadGeom]) -> Option<usize> {
+    if pads.is_empty() {
+        return None;
+    }
+    Some(pads.iter().position(|p| p.number == "1").unwrap_or(0))
+}
+
+/// The rectangle corner (of the four) nearest point `(px, py)`.
+fn nearest_corner(min_x: f64, min_y: f64, max_x: f64, max_y: f64, px: f64, py: f64) -> (f64, f64) {
+    let cx = if (px - min_x).abs() <= (max_x - px).abs() {
+        min_x
+    } else {
+        max_x
+    };
+    let cy = if (py - min_y).abs() <= (max_y - py).abs() {
+        min_y
+    } else {
+        max_y
+    };
+    (cx, cy)
+}
+
+fn point_toward(from: (f64, f64), toward: (f64, f64), d: f64) -> (f64, f64) {
+    let dx = toward.0 - from.0;
+    let dy = toward.1 - from.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-9 {
+        return from;
+    }
+    (from.0 + dx / len * d, from.1 + dy / len * d)
+}
+
+/// Ordered vertices of a rectangle outline whose corner nearest `(px, py)` is
+/// chamfered by `chamfer` mm (clamped to 40% of the shorter side) — the F.Fab
+/// pin-1 marker. Clockwise, KiCAD footprint Y-down.
+fn chamfered_rect_points(
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+    px: f64,
+    py: f64,
+    chamfer: f64,
+) -> Vec<(f64, f64)> {
+    let ch = chamfer
+        .min(0.4 * (max_x - min_x).min(max_y - min_y))
+        .max(0.0);
+    let corners = [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y),
+    ];
+    let (tcx, tcy) = nearest_corner(min_x, min_y, max_x, max_y, px, py);
+    let mut pts = Vec::new();
+    for (i, &(cx, cy)) in corners.iter().enumerate() {
+        if (cx - tcx).abs() < 1e-9 && (cy - tcy).abs() < 1e-9 && ch > 0.0 {
+            let prev = corners[(i + 3) % 4];
+            let next = corners[(i + 1) % 4];
+            pts.push(point_toward((cx, cy), prev, ch));
+            pts.push(point_toward((cx, cy), next, ch));
+        } else {
+            pts.push((cx, cy));
+        }
+    }
+    pts
+}
+
+/// Emit the `(model ...)` block when a `model` object with a non-empty `path`
+/// is present. Path is passed through verbatim (absolute or KiCAD env-var).
+fn build_model_sexp(args: &serde_json::Value) -> String {
+    let model = match args.get("model") {
+        Some(m) if m.is_object() => m,
+        _ => return String::new(),
+    };
+    let path = match model["path"].as_str() {
+        Some(p) if !p.is_empty() => p,
+        _ => return String::new(),
+    };
+    let xyz = |key: &str, default: f64| -> (f64, f64, f64) {
+        let o = &model[key];
+        (
+            o["x"].as_f64().unwrap_or(default),
+            o["y"].as_f64().unwrap_or(default),
+            o["z"].as_f64().unwrap_or(default),
+        )
+    };
+    let (ox, oy, oz) = xyz("offset", 0.0);
+    let (sx, sy, sz) = xyz("scale", 1.0);
+    let (rx, ry, rz) = xyz("rotate", 0.0);
+    format!(
+        "\n  (model \"{}\"\n    (offset (xyz {} {} {}))\n    (scale (xyz {} {} {}))\n    (rotate (xyz {} {} {}))\n  )",
+        path, ox, oy, oz, sx, sy, sz, rx, ry, rz
+    )
+}
+
+/// Build the courtyard, silkscreen, fab outline, reference/value text, and the
+/// pin-1 marker (silk dot + fab chamfer) for a footprint from its pad geometry.
+fn build_footprint_graphics(args: &serde_json::Value, name: &str, pads: &[PadGeom]) -> String {
+    let (pmin_x, pmin_y, pmax_x, pmax_y) = pads_bbox(pads);
+
+    let body = match (args["body_width"].as_f64(), args["body_height"].as_f64()) {
+        (Some(bw), Some(bh)) => Some((bw, bh)),
+        _ => None,
+    };
+    let clearance = courtyard_clearance(
+        args["courtyard_clearance"].as_f64(),
+        args["package_type"].as_str(),
+        pads,
+        body,
+    );
+
+    // Courtyard: pad envelope + clearance.
+    let (cmin_x, cmin_y, cmax_x, cmax_y) = (
+        pmin_x - clearance,
+        pmin_y - clearance,
+        pmax_x + clearance,
+        pmax_y + clearance,
+    );
+
+    // Silk: just outside the pad envelope so it clears pads (avoids the
+    // silk-over-pad DRC violation) regardless of the body outline.
+    let silk_margin = 0.15;
+    let (smin_x, smin_y, smax_x, smax_y) = (
+        pmin_x - silk_margin,
+        pmin_y - silk_margin,
+        pmax_x + silk_margin,
+        pmax_y + silk_margin,
+    );
+
+    // Fab: the component body when given, else the pad envelope. May overlap
+    // pads — fab is a documentation layer, not subject to silk-over-pad rules.
+    let (fmin_x, fmin_y, fmax_x, fmax_y) = match body {
+        Some((bw, bh)) => {
+            let cx = (pmin_x + pmax_x) / 2.0;
+            let cy = (pmin_y + pmax_y) / 2.0;
+            (cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0)
+        }
+        None => (pmin_x, pmin_y, pmax_x, pmax_y),
+    };
+
+    let mut s = String::new();
+
+    // Courtyard rectangle (F.CrtYd) — required for DRC.
+    s.push_str(&format!(
+        "\n  (fp_rect (start {:.4} {:.4}) (end {:.4} {:.4}) (stroke (width 0.05) (type solid)) (fill none) (layer \"F.CrtYd\"))",
+        cmin_x, cmin_y, cmax_x, cmax_y
+    ));
+    // Silkscreen outline (F.SilkS).
+    s.push_str(&format!(
+        "\n  (fp_rect (start {:.4} {:.4}) (end {:.4} {:.4}) (stroke (width 0.12) (type solid)) (fill none) (layer \"F.SilkS\"))",
+        smin_x, smin_y, smax_x, smax_y
+    ));
+
+    if let Some(i1) = pin1_index(pads) {
+        let p1 = &pads[i1];
+
+        // Fab outline with the pin-1 corner chamfered.
+        let chamfer = (0.25 * (fmax_x - fmin_x).min(fmax_y - fmin_y)).clamp(0.3, 1.0);
+        let pts = chamfered_rect_points(fmin_x, fmin_y, fmax_x, fmax_y, p1.x, p1.y, chamfer);
+        let pts_str: String = pts
+            .iter()
+            .map(|(x, y)| format!("(xy {:.4} {:.4}) ", x, y))
+            .collect();
+        s.push_str(&format!(
+            "\n  (fp_poly (pts {}) (stroke (width 0.1) (type solid)) (fill none) (layer \"F.Fab\"))",
+            pts_str.trim()
+        ));
+
+        // Silk pin-1 dot just outside the silk outline, aligned with pin 1's
+        // pad — NOT at the footprint corner, where a dot is ambiguous between
+        // pin 1 and the last pin that shares the same corner. It sits directly
+        // beside pin 1 so the mark is unmistakable.
+        let bcx = (pmin_x + pmax_x) / 2.0;
+        let bcy = (pmin_y + pmax_y) / 2.0;
+        let (dx, dy) = if (p1.x - bcx).abs() >= (p1.y - bcy).abs() {
+            // Pin 1 is on a left/right edge: dot outside that edge, at pin 1's y.
+            let sign = if p1.x < bcx { -1.0 } else { 1.0 };
+            let edge = if sign < 0.0 { smin_x } else { smax_x };
+            (edge + sign * 0.4, p1.y)
+        } else {
+            // Pin 1 is on a top/bottom edge: dot outside that edge, at pin 1's x.
+            let sign = if p1.y < bcy { -1.0 } else { 1.0 };
+            let edge = if sign < 0.0 { smin_y } else { smax_y };
+            (p1.x, edge + sign * 0.4)
+        };
+        s.push_str(&format!(
+            "\n  (fp_circle (center {:.4} {:.4}) (end {:.4} {:.4}) (stroke (width 0.1) (type solid)) (fill solid) (layer \"F.SilkS\"))",
+            dx, dy, dx + 0.15, dy
+        ));
+    } else {
+        // No pads to mark pin 1 against — plain fab rectangle.
+        s.push_str(&format!(
+            "\n  (fp_rect (start {:.4} {:.4}) (end {:.4} {:.4}) (stroke (width 0.1) (type solid)) (fill none) (layer \"F.Fab\"))",
+            fmin_x, fmin_y, fmax_x, fmax_y
+        ));
+    }
+
+    // Reference (F.SilkS, above) and value (F.Fab, below).
+    let cx = (pmin_x + pmax_x) / 2.0;
+    s.push_str(&format!(
+        "\n  (fp_text reference \"REF**\" (at {:.4} {:.4} 0) (layer \"F.SilkS\") (effects (font (size 1 1) (thickness 0.15))))",
+        cx, cmin_y - 1.0
+    ));
+    s.push_str(&format!(
+        "\n  (fp_text value \"{}\" (at {:.4} {:.4} 0) (layer \"F.Fab\") (effects (font (size 1 1) (thickness 0.15))))",
+        name, cx, cmax_y + 1.0
+    ));
+
+    s
+}
+
 async fn handle_create_footprint(
     args: &serde_json::Value,
     _ctx: &ToolContext,
@@ -270,10 +607,11 @@ async fn handle_create_footprint(
     let description = args["description"].as_str().unwrap_or("");
 
     let pads_val = args["pads"].as_array().cloned().unwrap_or_default();
+    let mut pad_geoms: Vec<PadGeom> = Vec::new();
     let mut pad_sexp = String::new();
     for pad in &pads_val {
-        let number = pad["number"].as_str().unwrap_or("1");
-        let pad_type = pad["type"].as_str().unwrap_or("smd");
+        let number = pad["number"].as_str().unwrap_or("1").to_string();
+        let pad_type = pad["type"].as_str().unwrap_or("smd").to_string();
         let shape = pad["shape"].as_str().unwrap_or("rect");
         let x = pad["x"].as_f64().unwrap_or(0.0);
         let y = pad["y"].as_f64().unwrap_or(0.0);
@@ -293,28 +631,36 @@ async fn handle_create_footprint(
         };
 
         pad_sexp.push_str(&format!(
-            r#"
-  (pad "{}" {} {} (at {} {}) (size {} {}) {} {})"#,
+            "\n  (pad \"{}\" {} {} (at {} {}) (size {} {}) {} {})",
             number, pad_type, shape, x, y, w, h, layers, drill_sexp
         ));
+        pad_geoms.push(PadGeom {
+            number,
+            pad_type,
+            x,
+            y,
+            w,
+            h,
+        });
     }
 
+    // Courtyard, silk, fab, text, and pin-1 marker, derived from pad geometry.
+    let graphics = if pad_geoms.is_empty() {
+        String::new()
+    } else {
+        build_footprint_graphics(args, name, &pad_geoms)
+    };
+    let model_sexp = build_model_sexp(args);
+
+    let attr = if pad_geoms.iter().any(|p| p.pad_type == "smd") {
+        "smd"
+    } else {
+        "through_hole"
+    };
+
     let content = format!(
-        r#"(footprint "{}"
-  (version 20240108)
-  (generator "konnect")
-  (layer "F.Cu")
-  (descr "{}")
-  (attr {}){}
-)"#,
-        name,
-        description,
-        if pads_val.iter().any(|p| p["type"].as_str() == Some("smd")) {
-            "smd"
-        } else {
-            "through_hole"
-        },
-        pad_sexp
+        "(footprint \"{}\"\n  (version 20240108)\n  (generator \"konnect\")\n  (layer \"F.Cu\")\n  (descr \"{}\")\n  (attr {}){}{}{}\n)",
+        name, description, attr, pad_sexp, graphics, model_sexp
     );
 
     // Ensure parent directory exists
@@ -328,7 +674,10 @@ async fn handle_create_footprint(
             "success": true,
             "footprint": name,
             "output": output.to_str().unwrap_or(""),
-            "pad_count": pads_val.len()
+            "pad_count": pad_geoms.len(),
+            "courtyard": !pad_geoms.is_empty(),
+            "pin1_marked": !pad_geoms.is_empty(),
+            "model": args.get("model").and_then(|m| m["path"].as_str()).unwrap_or("")
         }))
         .unwrap(),
     ))
@@ -724,19 +1073,107 @@ async fn register_in_lib_table(
 
 // ─── Symbol library tools ─────────────────────────────────────────────────────
 
-async fn handle_create_symbol(
-    args: &serde_json::Value,
-    _ctx: &ToolContext,
-) -> anyhow::Result<CallToolResult> {
-    let lib_path = get_path(args, "library_path")?;
-    let name = args["name"].as_str().unwrap_or("Symbol");
-    let ref_prefix = args["reference_prefix"].as_str().unwrap_or("U");
-    let value_str = args["value"].as_str().unwrap_or(name);
-    let pins_val = args["pins"].as_array().cloned().unwrap_or_default();
+/// Minimal pin geometry for deriving the symbol body.
+#[derive(Debug, Clone, Copy)]
+struct PinGeom {
+    x: f64,
+    y: f64,
+    angle: f64,
+    length: f64,
+}
 
-    // Build pin S-expressions
+/// The point where a pin meets the symbol body. In KiCAD symbols the pin's
+/// connection endpoint (the "bulb", where wires attach) is at `(x, y)` and the
+/// pin extends by `length` in its orientation to reach the body outline. Angles
+/// are 0=E, 90=N, 180=W, 270=S with Y up, so the body-attach point (root) is
+/// `(x + length*cos, y + length*sin)` — on the far side of the bulb.
+fn pin_root(x: f64, y: f64, angle_deg: f64, length: f64) -> (f64, f64) {
+    let a = angle_deg.to_radians();
+    (x + length * a.cos(), y + length * a.sin())
+}
+
+/// Body rectangle `(min_x, min_y, max_x, max_y)` for a symbol: edges that pins
+/// attach to pass through those pins' roots (so each pin's far end touches the
+/// border and its connection bulb sits outside), and edges with no pins are
+/// pushed out by a margin so there is clear spacing beyond the outermost pins.
+/// `None` when there are no pins.
+fn symbol_body_rect(pins: &[PinGeom]) -> Option<(f64, f64, f64, f64)> {
+    if pins.is_empty() {
+        return None;
+    }
+    let roots: Vec<(f64, f64)> = pins
+        .iter()
+        .map(|p| pin_root(p.x, p.y, p.angle, p.length))
+        .collect();
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for &(x, y) in &roots {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    // Which edges have pins attaching, by orientation (Y up): a pin pointing
+    // right (0) sits on the left edge, left (180) on the right edge, up (90) on
+    // the bottom edge, down (270) on the top edge.
+    let norm = |a: f64| ((a % 360.0) + 360.0) % 360.0;
+    let near = |a: f64, t: f64| {
+        let d = (norm(a) - t).abs();
+        !(1.0..=359.0).contains(&d)
+    };
+    let (mut has_left, mut has_right, mut has_bottom, mut has_top) = (false, false, false, false);
+    for p in pins {
+        if near(p.angle, 0.0) {
+            has_left = true;
+        } else if near(p.angle, 180.0) {
+            has_right = true;
+        } else if near(p.angle, 90.0) {
+            has_bottom = true;
+        } else if near(p.angle, 270.0) {
+            has_top = true;
+        }
+    }
+
+    // Spacing beyond the last pin on any edge without attachments (~1 grid).
+    let margin = 2.54;
+    if !has_left {
+        min_x -= margin;
+    }
+    if !has_right {
+        max_x += margin;
+    }
+    if !has_bottom {
+        min_y -= margin;
+    }
+    if !has_top {
+        max_y += margin;
+    }
+
+    // Minimum visible body.
+    let min_size = 2.54;
+    if max_x - min_x < min_size {
+        let c = (min_x + max_x) / 2.0;
+        min_x = c - min_size / 2.0;
+        max_x = c + min_size / 2.0;
+    }
+    if max_y - min_y < min_size {
+        let c = (min_y + max_y) / 2.0;
+        min_y = c - min_size / 2.0;
+        max_y = c + min_size / 2.0;
+    }
+    Some((min_x, min_y, max_x, max_y))
+}
+
+/// Build one unit's inner S-expression — an optional body rectangle (when
+/// `with_body`) followed by its pins — and return it with the body rect (used
+/// for reference/value placement). Shared by the single- and multi-unit paths.
+fn build_symbol_unit(pins_val: &[serde_json::Value], with_body: bool) -> (String, SymbolRect) {
     let mut pins_sexp = String::new();
-    for pin in &pins_val {
+    let mut pin_geoms: Vec<PinGeom> = Vec::new();
+    for pin in pins_val {
         let number = pin["number"].as_str().unwrap_or("1");
         let pin_name = pin["name"].as_str().unwrap_or("~");
         let pin_type = pin["type"].as_str().unwrap_or("passive");
@@ -745,39 +1182,120 @@ async fn handle_create_symbol(
         let angle = pin["angle"].as_f64().unwrap_or(0.0);
         let length = pin["length"].as_f64().unwrap_or(2.54);
 
+        pin_geoms.push(PinGeom {
+            x,
+            y,
+            angle,
+            length,
+        });
         pins_sexp.push_str(&format!(
-            r#"
-    (pin {} line (at {} {} {})
-      (length {})
-      (name "{}" (effects (font (size 1.27 1.27))))
-      (number "{}" (effects (font (size 1.27 1.27))))
-    )"#,
+            "\n    (pin {} line (at {} {} {})\n      (length {})\n      (name \"{}\" (effects (font (size 1.27 1.27))))\n      (number \"{}\" (effects (font (size 1.27 1.27))))\n    )",
             pin_type, x, y, angle, length, pin_name, number
         ));
     }
+    let body = if with_body {
+        symbol_body_rect(&pin_geoms)
+    } else {
+        None
+    };
+    let body_sexp = match body {
+        Some((min_x, min_y, max_x, max_y)) => format!(
+            "\n      (rectangle (start {:.4} {:.4}) (end {:.4} {:.4})\n        (stroke (width 0.254) (type default))\n        (fill (type background))\n      )",
+            min_x, min_y, max_x, max_y
+        ),
+        None => String::new(),
+    };
+    (format!("{}{}", body_sexp, pins_sexp), body)
+}
+
+type SymbolRect = Option<(f64, f64, f64, f64)>;
+
+async fn handle_create_symbol(
+    args: &serde_json::Value,
+    _ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let lib_path = get_path(args, "library_path")?;
+    let name = args["name"].as_str().unwrap_or("Symbol");
+    let ref_prefix = args["reference_prefix"].as_str().unwrap_or("U");
+    let value_str = args["value"].as_str().unwrap_or(name);
+    let show_names = args["show_pin_names"].as_bool().unwrap_or(true);
+    let show_numbers = args["show_pin_numbers"].as_bool().unwrap_or(true);
+
+    // Multi-unit when `units` is a non-empty array; otherwise the single-unit
+    // `pins` path. Sub-symbols are named NAME_<unit>_1; unit 0 holds items drawn
+    // on every unit (common power pins), units 1..N are the individual units.
+    let units: Vec<Vec<serde_json::Value>> = args["units"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|u| u["pins"].as_array().cloned().unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default();
+    let power_pins = args["power_pins"].as_array().cloned().unwrap_or_default();
+
+    let mut units_sexp = String::new();
+    let unit_count: usize;
+    let ref_body: SymbolRect;
+    if units.is_empty() {
+        // Single unit: body + all pins live in NAME_0_1 (unchanged behavior).
+        let pins_val = args["pins"].as_array().cloned().unwrap_or_default();
+        let (inner, body) = build_symbol_unit(&pins_val, true);
+        units_sexp.push_str(&format!("\n    (symbol \"{}_0_1\"{}\n    )", name, inner));
+        unit_count = 1;
+        ref_body = body;
+    } else {
+        // Multi-unit: each signal unit is NAME_1_1..NAME_N_1, and the power
+        // pins (if any) become a dedicated FINAL unit rather than being drawn
+        // on every unit. KiCAD's own multi-unit parts do this (e.g. 74LS00 has
+        // the four gates as units 1..4 and VCC/GND as unit 5). It means the
+        // power pins appear on exactly one placed unit instead of on every
+        // unit, where each duplicate would otherwise need wiring to pass ERC.
+        let mut first_body: SymbolRect = None;
+        for (i, unit_pins) in units.iter().enumerate() {
+            let (inner, body) = build_symbol_unit(unit_pins, true);
+            if i == 0 {
+                first_body = body;
+            }
+            units_sexp.push_str(&format!(
+                "\n    (symbol \"{}_{}_1\"{}\n    )",
+                name,
+                i + 1,
+                inner
+            ));
+        }
+        let mut total = units.len();
+        if !power_pins.is_empty() {
+            let (inner, _) = build_symbol_unit(&power_pins, true);
+            total += 1;
+            units_sexp.push_str(&format!(
+                "\n    (symbol \"{}_{}_1\"{}\n    )",
+                name, total, inner
+            ));
+        }
+        unit_count = total;
+        ref_body = first_body;
+    }
+
+    // Reference/value placement above/below the (first) unit body (Y-up).
+    let (ref_y, value_y) = match ref_body {
+        Some((_, min_y, _, max_y)) => (max_y + 2.54, min_y - 2.54),
+        None => (2.54, -2.54),
+    };
+
+    let numbers_vis = if show_numbers { "" } else { " hide" };
+    let names_vis = if show_names { "" } else { " hide" };
 
     let symbol_sexp = format!(
-        r#"
-  (symbol "{}"
-    (pin_numbers hide)
-    (pin_names (offset 1.016) hide)
-    (in_bom yes)
-    (on_board yes)
-    (property "Reference" "{}" (at 0 0 0) (effects (font (size 1.27 1.27))))
-    (property "Value" "{}" (at 0 -2.54 0) (effects (font (size 1.27 1.27))))
-    (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
-    (property "Datasheet" "~" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
-    (symbol "{}_0_1"{}
-    )
-  )"#,
-        name, ref_prefix, value_str, name, pins_sexp
+        "\n  (symbol \"{}\"\n    (pin_numbers{})\n    (pin_names (offset 1.016){})\n    (in_bom yes)\n    (on_board yes)\n    (property \"Reference\" \"{}\" (at 0 {:.4} 0) (effects (font (size 1.27 1.27))))\n    (property \"Value\" \"{}\" (at 0 {:.4} 0) (effects (font (size 1.27 1.27))))\n    (property \"Footprint\" \"\" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))\n    (property \"Datasheet\" \"~\" (at 0 0 0) (effects (font (size 1.27 1.27)) hide)){}\n  )",
+        name, numbers_vis, names_vis, ref_prefix, ref_y, value_str, value_y, units_sexp
     );
 
     // If file doesn't exist, create scaffold
     let content = if lib_path.exists() {
         tokio::fs::read_to_string(&lib_path).await?
     } else {
-        "(kicad_symbol_lib\n  (version 20240108)\n  (generator \"kicad-mcp\")\n)\n".to_string()
+        "(kicad_symbol_lib\n  (version 20240108)\n  (generator \"konnect\")\n)\n".to_string()
     };
 
     // Insert before closing paren of root expression
@@ -794,7 +1312,8 @@ async fn handle_create_symbol(
             "success": true,
             "symbol": name,
             "library": lib_path.to_str().unwrap_or(""),
-            "pin_count": pins_val.len()
+            "unit_count": unit_count,
+            "power_pin_count": power_pins.len()
         }))
         .unwrap(),
     ))
@@ -1280,4 +1799,345 @@ fn extract_at_xy(block: &str) -> Option<(f64, f64)> {
     let x = parts.first()?.parse::<f64>().ok()?;
     let y = parts.get(1)?.parse::<f64>().ok()?;
     Some((x, y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::router::ToolRouter;
+    use crate::tools::ServerConfig;
+    use std::sync::Arc;
+
+    fn test_ctx() -> ToolContext {
+        ToolContext::new(
+            ServerConfig {
+                kicad_cli: String::new(),
+                kicad_binary: String::new(),
+                ipc_address: String::new(),
+                project_dir: None,
+                jlcpcb_db_path: None,
+            },
+            Arc::new(ToolRouter::new()),
+        )
+    }
+
+    fn pad(number: &str, t: &str, x: f64, y: f64, w: f64, h: f64) -> PadGeom {
+        PadGeom {
+            number: number.into(),
+            pad_type: t.into(),
+            x,
+            y,
+            w,
+            h,
+        }
+    }
+
+    #[test]
+    fn pads_bbox_covers_pad_extents() {
+        let pads = vec![
+            pad("1", "smd", -1.0, 0.0, 0.4, 0.6),
+            pad("2", "smd", 1.0, 0.0, 0.4, 0.6),
+        ];
+        let (min_x, min_y, max_x, max_y) = pads_bbox(&pads);
+        assert!((min_x - -1.2).abs() < 1e-9); // -1.0 - 0.4/2
+        assert!((max_x - 1.2).abs() < 1e-9);
+        assert!((min_y - -0.3).abs() < 1e-9);
+        assert!((max_y - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn courtyard_clearance_follows_the_rule() {
+        let smd = vec![pad("1", "smd", 0.0, 0.0, 0.4, 0.6)];
+        let th = vec![pad("1", "thru_hole", 0.0, 0.0, 1.5, 1.5)];
+        // Explicit wins over everything.
+        assert_eq!(
+            courtyard_clearance(Some(0.42), Some("bga"), &smd, None),
+            0.42
+        );
+        // package_type mapping.
+        assert_eq!(courtyard_clearance(None, Some("bga"), &smd, None), 1.0);
+        assert_eq!(courtyard_clearance(None, Some("small"), &smd, None), 0.15);
+        assert_eq!(
+            courtyard_clearance(None, Some("through_hole"), &smd, None),
+            0.5
+        );
+        assert_eq!(courtyard_clearance(None, Some("smd"), &smd, None), 0.25);
+        // Auto: through-hole pad present.
+        assert_eq!(courtyard_clearance(None, None, &th, None), 0.5);
+        // Auto: sub-0603 body (1.0 x 0.5 mm).
+        assert_eq!(
+            courtyard_clearance(None, None, &smd, Some((1.0, 0.5))),
+            0.15
+        );
+        // Auto: 0603 itself and larger stay at the SMT default.
+        assert_eq!(
+            courtyard_clearance(None, None, &smd, Some((1.6, 0.8))),
+            0.25
+        );
+        assert_eq!(courtyard_clearance(None, None, &smd, None), 0.25);
+    }
+
+    #[test]
+    fn pin1_index_prefers_pad_numbered_one() {
+        let pads = vec![
+            pad("2", "smd", 0.0, 0.0, 1.0, 1.0),
+            pad("1", "smd", 2.0, 0.0, 1.0, 1.0),
+        ];
+        assert_eq!(pin1_index(&pads), Some(1));
+        // No pad numbered "1" falls back to the first pad.
+        let pads2 = vec![pad("A1", "smd", 0.0, 0.0, 1.0, 1.0)];
+        assert_eq!(pin1_index(&pads2), Some(0));
+        assert_eq!(pin1_index(&[]), None);
+    }
+
+    #[test]
+    fn chamfered_rect_cuts_the_pin1_corner() {
+        // Rectangle (0,0)-(10,10), pin 1 nearest the top-left corner.
+        let pts = chamfered_rect_points(0.0, 0.0, 10.0, 10.0, 0.0, 0.0, 1.0);
+        assert_eq!(pts.len(), 5, "one corner chamfered adds a vertex: {pts:?}");
+        // The sharp corner is gone, replaced by two edge points.
+        assert!(!pts.iter().any(|&(x, y)| x.abs() < 1e-9 && y.abs() < 1e-9));
+        assert!(pts
+            .iter()
+            .any(|&(x, y)| (x - 0.0).abs() < 1e-9 && (y - 1.0).abs() < 1e-9));
+        assert!(pts
+            .iter()
+            .any(|&(x, y)| (x - 1.0).abs() < 1e-9 && (y - 0.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn pin_root_is_on_the_body_side_of_the_connection() {
+        // Left pin (points right): bulb on the left, root to its right (body).
+        let (lx, ly) = pin_root(-10.16, 0.0, 0.0, 2.54);
+        assert!(
+            (lx - -7.62).abs() < 1e-9 && ly.abs() < 1e-9,
+            "left {lx},{ly}"
+        );
+        // Right pin (points left): root to the left of the bulb.
+        let (rx, ry) = pin_root(10.16, 0.0, 180.0, 2.54);
+        assert!(
+            (rx - 7.62).abs() < 1e-9 && ry.abs() < 1e-9,
+            "right {rx},{ry}"
+        );
+        // Up pin (points up, Y-up): root above the bulb.
+        let (ux, uy) = pin_root(0.0, -5.0, 90.0, 2.54);
+        assert!(ux.abs() < 1e-9 && (uy - -2.46).abs() < 1e-9, "up {ux},{uy}");
+    }
+
+    #[test]
+    fn symbol_body_rect_touches_side_pins_and_spaces_the_ends() {
+        // Three pins on the left (point right), two on the right (point left).
+        let pins = vec![
+            PinGeom {
+                x: -10.16,
+                y: 2.54,
+                angle: 0.0,
+                length: 2.54,
+            },
+            PinGeom {
+                x: -10.16,
+                y: 0.0,
+                angle: 0.0,
+                length: 2.54,
+            },
+            PinGeom {
+                x: -10.16,
+                y: -2.54,
+                angle: 0.0,
+                length: 2.54,
+            },
+            PinGeom {
+                x: 10.16,
+                y: 2.54,
+                angle: 180.0,
+                length: 2.54,
+            },
+            PinGeom {
+                x: 10.16,
+                y: -2.54,
+                angle: 180.0,
+                length: 2.54,
+            },
+        ];
+        let (min_x, min_y, max_x, max_y) = symbol_body_rect(&pins).unwrap();
+        // Left/right edges pass through the pin roots (pins touch the border).
+        assert!((min_x - -7.62).abs() < 1e-9, "left edge {min_x}");
+        assert!((max_x - 7.62).abs() < 1e-9, "right edge {max_x}");
+        // Connection bulbs at x = ±10.16 stay outside the body.
+        assert!(min_x > -10.16 && max_x < 10.16);
+        // Top/bottom edges have no pins → spacing beyond the outermost pins.
+        assert!(max_y >= 2.54 + 2.5, "top spacing {max_y}");
+        assert!(min_y <= -2.54 - 2.5, "bottom spacing {min_y}");
+        assert!(symbol_body_rect(&[]).is_none());
+    }
+
+    #[test]
+    fn model_sexp_only_with_path() {
+        assert_eq!(build_model_sexp(&json!({})), "");
+        assert_eq!(build_model_sexp(&json!({ "model": {} })), "");
+        let s = build_model_sexp(&json!({ "model": { "path": "x.wrl", "rotate": { "z": 90.0 } } }));
+        assert!(s.contains("(model \"x.wrl\""));
+        assert!(s.contains("(rotate (xyz 0 0 90)"));
+        assert!(s.contains("(scale (xyz 1 1 1)"));
+    }
+
+    #[tokio::test]
+    async fn create_footprint_emits_courtyard_pin1_and_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("TEST.kicad_mod");
+        let args = json!({
+            "output": out.to_string_lossy(),
+            "name": "TEST_QFN",
+            "pads": [
+                {"number":"1","type":"smd","shape":"roundrect","x":-1.0,"y":-1.0,"width":0.3,"height":0.6},
+                {"number":"2","type":"smd","shape":"roundrect","x":-1.0,"y":1.0,"width":0.3,"height":0.6},
+                {"number":"3","type":"smd","shape":"roundrect","x":1.0,"y":0.0,"width":0.3,"height":0.6}
+            ],
+            "body_width": 2.0, "body_height": 2.0,
+            "model": { "path": "${KICAD9_3DMODEL_DIR}/Package.3dshapes/TEST_QFN.wrl" }
+        });
+        let res = handle_create_footprint(&args, &test_ctx()).await.unwrap();
+        assert!(!res.is_error);
+        let c = std::fs::read_to_string(&out).unwrap();
+        assert!(c.contains("F.CrtYd"), "missing courtyard:\n{c}");
+        assert!(c.contains("F.SilkS"));
+        assert!(c.contains("(fp_poly"), "missing fab chamfer outline");
+        assert!(c.contains("(fp_circle"), "missing pin-1 silk dot");
+        assert!(c.contains("(fp_text reference \"REF**\""));
+        assert!(c.contains("(fp_text value \"TEST_QFN\""));
+        assert!(c.contains("(model \"${KICAD9_3DMODEL_DIR}/Package.3dshapes/TEST_QFN.wrl\""));
+        // Round-trips through the S-expression parser.
+        assert!(
+            konnect_sexp::parser::parse_sexp(&c).is_ok(),
+            "generated footprint doesn't parse"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_symbol_emits_body_and_shows_pins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("test.kicad_sym");
+        let args = json!({
+            "library_path": lib.to_string_lossy(),
+            "name": "TEST_IC",
+            "reference_prefix": "U",
+            "pins": [
+                {"number":"1","name":"IN","type":"input","x":-7.62,"y":2.54,"angle":0,"length":2.54},
+                {"number":"2","name":"GND","type":"power_in","x":-7.62,"y":-2.54,"angle":0,"length":2.54},
+                {"number":"3","name":"OUT","type":"output","x":7.62,"y":0.0,"angle":180,"length":2.54}
+            ]
+        });
+        let res = handle_create_symbol(&args, &test_ctx()).await.unwrap();
+        assert!(!res.is_error);
+        let c = std::fs::read_to_string(&lib).unwrap();
+        assert!(
+            c.contains("(rectangle"),
+            "missing symbol body rectangle:\n{c}"
+        );
+        assert!(
+            c.contains("(generator \"konnect\")"),
+            "stale generator string"
+        );
+        assert!(c.contains("(pin_numbers)"), "pin numbers should be shown");
+        assert!(!c.contains("(pin_numbers hide)"));
+        assert!(
+            konnect_sexp::parser::parse_sexp(&c).is_ok(),
+            "generated symbol doesn't parse"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_symbol_single_unit_uses_unit_0_only() {
+        // Regression: without `units`, a symbol is one sub-symbol NAME_0_1 and
+        // creates no NAME_1_1 unit (unchanged from before multi-unit support).
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("s.kicad_sym");
+        let args = json!({
+            "library_path": lib.to_string_lossy(),
+            "name": "SINGLE",
+            "reference_prefix": "U",
+            "pins": [{"number":"1","name":"A","type":"passive","x":-5.08,"y":0.0,"angle":0,"length":2.54}]
+        });
+        handle_create_symbol(&args, &test_ctx()).await.unwrap();
+        let c = std::fs::read_to_string(&lib).unwrap();
+        assert!(
+            c.contains("(symbol \"SINGLE_0_1\""),
+            "single unit lives in _0_1:\n{c}"
+        );
+        assert!(
+            !c.contains("SINGLE_1_1"),
+            "single unit must not create a _1_1 unit"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_symbol_multi_unit_emits_units_and_common() {
+        // A dual op-amp: two signal units + power pins as a dedicated 3rd unit.
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("dual.kicad_sym");
+        let args = json!({
+            "library_path": lib.to_string_lossy(),
+            "name": "DUAL_OPAMP",
+            "reference_prefix": "U",
+            "value": "DUAL_OPAMP",
+            "units": [
+                { "pins": [
+                    {"number":"3","name":"+","type":"input","x":-10.16,"y":2.54,"angle":0,"length":2.54},
+                    {"number":"2","name":"-","type":"input","x":-10.16,"y":-2.54,"angle":0,"length":2.54},
+                    {"number":"1","name":"~","type":"output","x":10.16,"y":0.0,"angle":180,"length":2.54}
+                ]},
+                { "pins": [
+                    {"number":"5","name":"+","type":"input","x":-10.16,"y":2.54,"angle":0,"length":2.54},
+                    {"number":"6","name":"-","type":"input","x":-10.16,"y":-2.54,"angle":0,"length":2.54},
+                    {"number":"7","name":"~","type":"output","x":10.16,"y":0.0,"angle":180,"length":2.54}
+                ]}
+            ],
+            "power_pins": [
+                {"number":"8","name":"V+","type":"power_in","x":0.0,"y":7.62,"angle":270,"length":2.54},
+                {"number":"4","name":"V-","type":"power_in","x":0.0,"y":-7.62,"angle":90,"length":2.54}
+            ]
+        });
+        let res = handle_create_symbol(&args, &test_ctx()).await.unwrap();
+        assert!(!res.is_error);
+        let c = std::fs::read_to_string(&lib).unwrap();
+        // Two signal units + a dedicated power unit (unit 3). No common _0_1,
+        // and the power pins are NOT drawn on every unit.
+        assert!(
+            !c.contains("DUAL_OPAMP_0_1"),
+            "multi-unit must not use a common _0_1:\n{c}"
+        );
+        assert!(
+            c.contains("(symbol \"DUAL_OPAMP_1_1\""),
+            "missing signal unit 1"
+        );
+        assert!(
+            c.contains("(symbol \"DUAL_OPAMP_2_1\""),
+            "missing signal unit 2"
+        );
+        assert!(
+            c.contains("(symbol \"DUAL_OPAMP_3_1\""),
+            "missing dedicated power unit 3"
+        );
+        assert!(
+            !c.contains("DUAL_OPAMP_4_1"),
+            "should be exactly three units"
+        );
+        // The power pins appear once (in the power unit), not per signal unit.
+        assert_eq!(
+            c.matches("\"V+\"").count(),
+            1,
+            "V+ must appear exactly once"
+        );
+        assert_eq!(
+            c.matches("\"V-\"").count(),
+            1,
+            "V- must appear exactly once"
+        );
+        // A body rectangle per unit (2 signal + 1 power).
+        assert_eq!(c.matches("(rectangle").count(), 3, "one body per unit");
+        assert!(
+            konnect_sexp::parser::parse_sexp(&c).is_ok(),
+            "multi-unit symbol doesn't parse"
+        );
+    }
 }

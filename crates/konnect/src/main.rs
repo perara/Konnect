@@ -67,7 +67,11 @@ async fn main() -> Result<()> {
         .map(std::path::PathBuf::from);
 
     let config = if let Some(ref path) = config_path {
-        Config::load_from(path)?
+        // KiCAD launches the server this way (with KICAD_API_SOCKET set), so
+        // the env fallback for a blank ipc_address must apply here too (#39).
+        let mut c = Config::load_from(path)?;
+        c.apply_env_fallbacks();
+        c
     } else {
         Config::load()?
     };

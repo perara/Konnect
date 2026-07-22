@@ -126,7 +126,7 @@ packaging/build-pcm.sh \
   --viewer crates/schematic-viewer/target/release/schematic-viewer
 ```
 
-Install the resulting `dist/konnect-pcm-linux-v<version>.zip` through KiCAD's
+Install the resulting `dist/konnect-pcm-v<version>-linux.zip` through KiCAD's
 **Plugin and Content Manager → Install from File**, then restart KiCAD. The packaging
 script preserves executable permissions and stamps the Linux `bin/konnect`
 entrypoint into the bundled plugin manifest.

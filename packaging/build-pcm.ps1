@@ -14,10 +14,14 @@
 #   resources/
 #     icon.png               icon shown in the PCM dialog
 #
+# The package declares the platform it carries binaries for, so KiCAD's PCM only
+# offers it to machines that can run it. A package bundles one native binary, so
+# it is never valid for "all platforms".
+#
 # Usage:
 #   ./packaging/build-pcm.ps1 -Version 0.1.0 -BinaryPath target/release/konnect.exe `
 #       [-ViewerPath crates/schematic-viewer/target/release/schematic-viewer.exe] `
-#       [-OutDir dist]
+#       [-Platform windows] [-OutDir dist]
 #
 # Prints the zip path, size, and SHA256 (needed for the kicad-addons
 # repository metadata).
@@ -26,6 +30,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$BinaryPath,
     [string]$ViewerPath = "",
+    [ValidateSet("windows")][string]$Platform = "windows",
     [string]$OutDir = "dist"
 )
 
@@ -70,10 +75,17 @@ Copy-Item "$repoRoot/packaging/resources/icon.png" "$staging/plugins/resources/i
 # empty string violates the sha256 pattern and placeholder values are lies.
 # The real values (printed below) go into the kicad-addons repo submission.
 $metadata = Get-Content "$repoRoot/packaging/metadata.json" -Raw | ConvertFrom-Json
+# The repo metadata.json may carry one stamped entry per released platform
+# package; the metadata INSIDE a zip must describe only the package being
+# built, so keep just the first entry as the template.
+$metadata.versions = @($metadata.versions[0])
 $metadata.versions[0].version = $Version
 $installSize = (Get-ChildItem $staging -Recurse -File | Measure-Object Length -Sum).Sum
 $metadata.versions[0] | Add-Member -NotePropertyName install_size -NotePropertyValue ([long]$installSize) -Force
-$metadata.versions[0] | Add-Member -NotePropertyName platforms -NotePropertyValue @("windows") -Force
+# This package carries one platform's native binary — say so, or PCM offers a
+# Windows build to a macOS user and vice versa. [string[]] keeps ConvertTo-Json
+# from collapsing the single-element array into a bare string.
+$metadata.versions[0] | Add-Member -NotePropertyName platforms -NotePropertyValue ([string[]]@($Platform)) -Force
 $metadata.versions[0] | Add-Member -NotePropertyName runtime -NotePropertyValue "ipc" -Force
 foreach ($field in @("download_sha256", "download_url", "download_size")) {
     $metadata.versions[0].PSObject.Properties.Remove($field)
@@ -82,7 +94,7 @@ $metadata | ConvertTo-Json -Depth 10 | Set-Content "$staging/metadata.json"
 
 # Zip it
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-$zipPath = Join-Path (Resolve-Path $OutDir) "konnect-pcm-windows-v$Version.zip"
+$zipPath = Join-Path (Resolve-Path $OutDir) "konnect-pcm-v$Version-$Platform.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path "$staging/*" -DestinationPath $zipPath
 
@@ -94,4 +106,5 @@ Write-Host "PCM package: $zipPath"
 Write-Host "  download_size:   $size"
 Write-Host "  install_size:    $installSize"
 Write-Host "  download_sha256: $sha"
-Write-Host "  download_url:    https://github.com/perara/Konnect/releases/download/v$Version/konnect-pcm-windows-v$Version.zip"
+Write-Host "  platforms:       [$Platform]"
+Write-Host "  download_url:    https://github.com/mixelpixx/Konnect/releases/download/v$Version/konnect-pcm-v$Version-$Platform.zip"
