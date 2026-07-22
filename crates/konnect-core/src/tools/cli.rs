@@ -632,14 +632,22 @@ pub async fn render_pcb_png(cli: &str, pcb: &Path, output: &Path, layers: &[&str
 #[cfg(all(test, unix))]
 mod argument_tests {
     use super::*;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    // Some Linux CI filesystems transiently return ETXTBSY when separate
+    // tests create and execute shell fixtures concurrently.
+    static FAKE_CLI_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn fake_cli() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("kicad-cli");
         let log = dir.path().join("args.txt");
         let body = format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display());
-        std::fs::write(&script, body).unwrap();
+        let mut file = std::fs::File::create(&script).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
         let mut permissions = std::fs::metadata(&script).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script, permissions).unwrap();
@@ -656,6 +664,7 @@ mod argument_tests {
 
     #[tokio::test]
     async fn gerber_and_drill_use_kicad10_argument_shapes() {
+        let _guard = FAKE_CLI_GUARD.lock().await;
         let (_dir, cli, log) = fake_cli();
         export_gerber(
             cli.to_str().unwrap(),
@@ -701,6 +710,7 @@ mod argument_tests {
 
     #[tokio::test]
     async fn pdf_and_svg_honor_layers_color_and_single_file_mode() {
+        let _guard = FAKE_CLI_GUARD.lock().await;
         let (_dir, cli, log) = fake_cli();
         export_pdf(
             cli.to_str().unwrap(),
@@ -733,6 +743,7 @@ mod argument_tests {
 
     #[tokio::test]
     async fn bom_3d_and_position_options_are_forwarded() {
+        let _guard = FAKE_CLI_GUARD.lock().await;
         let (_dir, cli, log) = fake_cli();
         export_bom(
             cli.to_str().unwrap(),

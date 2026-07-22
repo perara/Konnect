@@ -21,6 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: arduino/setup-protoc@v3
         with:
+          version: "23.4"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - name: Check
@@ -38,6 +39,7 @@ jobs:
           components: clippy
       - uses: arduino/setup-protoc@v3
         with:
+          version: "23.4"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace -- -D warnings
