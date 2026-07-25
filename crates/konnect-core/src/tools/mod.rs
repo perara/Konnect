@@ -148,6 +148,11 @@ impl QueryCache {
         let mut entries = self.entries.lock().unwrap();
         entries.insert(key, (value, std::time::Instant::now()));
     }
+
+    /// Drops every cached query result after the backing catalog is replaced.
+    pub fn clear(&self) {
+        self.entries.lock().unwrap().clear();
+    }
 }
 
 impl Default for QueryCache {
@@ -188,6 +193,18 @@ mod query_cache_tests {
         let cache = QueryCache::new(std::time::Duration::from_secs(60));
         cache.put("key".to_string(), json!({ "count": 3 }));
         assert_eq!(cache.get("key"), Some(json!({ "count": 3 })));
+    }
+
+    #[test]
+    fn clear_invalidates_all_entries() {
+        let cache = QueryCache::new(std::time::Duration::from_secs(60));
+        cache.put("a".to_string(), json!(1));
+        cache.put("b".to_string(), json!(2));
+
+        cache.clear();
+
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.get("b"), None);
     }
 
     #[test]

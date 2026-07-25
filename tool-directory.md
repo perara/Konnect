@@ -292,7 +292,7 @@ Six tools, grouped into *discovery/routing* and *observability*.
 
 | Tool | Description |
 |------|-------------|
-| `download_jlcpcb_database` | Download or update the local JLCPCB parts database cache (SQLite). |
+| `download_jlcpcb_database` | Download, reassemble, and convert the current, basic, or full JLCPCB parts catalog into the local SQLite cache. |
 | `search_jlcpcb_parts` | Search the local JLCPCB database by keyword, value, or category. |
 | `get_jlcpcb_part` | Retrieve full details for a single JLCPCB part by LCSC part number. |
 | `suggest_jlcpcb_alternatives` | Suggest JLCPCB-stocked alternatives for a given component value and footprint. |

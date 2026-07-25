@@ -7,6 +7,7 @@
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, ToolContext, ToolDef};
+use konnect_sexp::writer::find_direct_child_blocks;
 use serde_json::json;
 use std::path::PathBuf;
 use tracing::{debug, error, info};
@@ -326,8 +327,18 @@ async fn handle_validate_for_manufacturing(
     }
 
     // Check for unrouted nets (ratsnest)
-    let net_count = content.matches("\n  (net ").count();
-    let track_count = content.matches("(segment ").count() + content.matches("(via ").count();
+    let board_items = find_direct_child_blocks(&content, "kicad_pcb");
+    let net_count = board_items
+        .iter()
+        .filter(|&&(start, end)| content[start..end].starts_with("(net "))
+        .count();
+    let track_count = board_items
+        .iter()
+        .filter(|&&(start, end)| {
+            let item = &content[start..end];
+            item.starts_with("(segment ") || item.starts_with("(via ")
+        })
+        .count();
     if net_count > 3 && track_count == 0 {
         issues.push(json!({
             "severity": "error",

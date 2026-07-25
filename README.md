@@ -7,6 +7,8 @@
 
 # Konnect *BETA Release
 
+</div>
+
 **AI-assisted PCB design for KiCad 10.** Konnect is a native Rust MCP server,
 packaged as a KiCad plugin, that lets Claude and other AI assistants design
 schematics and PCBs through the

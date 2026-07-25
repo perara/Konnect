@@ -45,6 +45,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 
 # SQLite (JLCPCB database)
 rusqlite = { version = "0.31", features = ["bundled"] }
+zip = { version = "8.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # Error handling
 anyhow = "1"

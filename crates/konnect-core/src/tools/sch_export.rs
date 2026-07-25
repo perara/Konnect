@@ -13,7 +13,10 @@ use konnect_sexp::{
         extract_labels, extract_lib_pins, extract_symbol_instances, extract_wires, pin_endpoint,
         read_schematic,
     },
-    writer::{apply_edits, find_block_with_leading_whitespace, write_atomic, SexpEdit},
+    writer::{
+        apply_edits, find_balanced_block, find_block_starts, find_enclosing_block, write_atomic,
+        SexpEdit,
+    },
 };
 use serde_json::json;
 
@@ -392,24 +395,18 @@ async fn handle_fix_connectivity(
                     if let Some(uuid_str) = &w.uuid {
                         let uuid_pat = format!(r#"(uuid "{uuid_str}")"#);
                         if let Some(uuid_pos) = content.find(&uuid_pat) {
-                            let before = &content[..uuid_pos];
-                            if let Some(ws) = before.rfind("\n  (wire").map(|p| p + 1) {
-                                if let Some((wbs, wbe)) =
-                                    find_block_with_leading_whitespace(&content, ws)
+                            if let Some((wbs, wbe)) =
+                                find_enclosing_block(&content, "wire", uuid_pos)
+                            {
+                                let wire_block = &content[wbs..wbe];
+                                if let Some((values_start, values_end)) =
+                                    wire_endpoint_values_span(wire_block, *is_start)
                                 {
-                                    let wire_block = &content[wbs..wbe];
-                                    let coord_prefix = if *is_start { "(start " } else { "(end " };
-                                    if let Some(coord_rel) = wire_block.find(coord_prefix) {
-                                        let vals_abs = wbs + coord_rel + coord_prefix.len();
-                                        let close_rel =
-                                            wire_block[coord_rel..].find(')').unwrap_or(0);
-                                        let vals_end = wbs + coord_rel + close_rel;
-                                        file_edits.push(SexpEdit::replace(
-                                            vals_abs,
-                                            vals_end,
-                                            format!("{tx} {ty}"),
-                                        ));
-                                    }
+                                    file_edits.push(SexpEdit::replace(
+                                        wbs + values_start,
+                                        wbs + values_end,
+                                        format!("{tx} {ty}"),
+                                    ));
                                 }
                             }
                         }
@@ -419,15 +416,92 @@ async fn handle_fix_connectivity(
         }
     }
 
-    if !dry_run && !file_edits.is_empty() {
+    let applied_count = if dry_run { 0 } else { file_edits.len() };
+    if applied_count > 0 {
         let new_content = apply_edits(content, file_edits);
         write_atomic(&sch_path, &new_content)?;
     }
 
     Ok(CallToolResult::json(&json!({
         "fixes_found": fixes.len(),
-        "applied": !dry_run && !fixes.is_empty(),
+        "applied": applied_count > 0,
+        "applied_count": applied_count,
         "dry_run": dry_run,
         "fixes": fixes
     })))
+}
+
+fn wire_endpoint_values_span(wire_block: &str, is_start: bool) -> Option<(usize, usize)> {
+    // KiCAD 8/9: `(start X Y)` / `(end X Y)`.
+    let legacy_tag = if is_start { "start" } else { "end" };
+    if let Some(span) = tagged_values_span(wire_block, legacy_tag, 0) {
+        return Some(span);
+    }
+
+    // KiCAD 10: `(pts (xy X1 Y1) (xy X2 Y2))`.
+    tagged_values_span(wire_block, "xy", usize::from(!is_start))
+}
+
+fn tagged_values_span(block: &str, tag: &str, occurrence: usize) -> Option<(usize, usize)> {
+    let block_start = *find_block_starts(block, tag).get(occurrence)?;
+    let (_, block_end) = find_balanced_block(block, block_start)?;
+    let bytes = block.as_bytes();
+
+    let mut values_start = block_start + 1 + tag.len();
+    while values_start < block_end && bytes[values_start].is_ascii_whitespace() {
+        values_start += 1;
+    }
+
+    let mut values_end = block_end.checked_sub(1)?;
+    while values_end > values_start && bytes[values_end - 1].is_ascii_whitespace() {
+        values_end -= 1;
+    }
+    (values_start < values_end).then_some((values_start, values_end))
+}
+
+#[cfg(test)]
+mod connectivity_fix_tests {
+    use super::*;
+    use crate::router::ToolRouter;
+    use crate::tools::{ServerConfig, ToolContext};
+    use std::sync::Arc;
+
+    fn test_ctx() -> ToolContext {
+        ToolContext::new(
+            ServerConfig {
+                kicad_cli: String::new(),
+                kicad_binary: String::new(),
+                ipc_address: String::new(),
+                project_dir: None,
+                jlcpcb_db_path: None,
+            },
+            Arc::new(ToolRouter::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn fixes_kicad_10_xy_wire_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connectivity.kicad_sch");
+        std::fs::write(
+            &path,
+            "(kicad_sch\n\t(version 20260306)\n\t(generator \"eeschema\")\n\t(wire\n\t\t(pts (xy 0 0) (xy 10 0))\n\t\t(stroke (width 0) (type default))\n\t\t(uuid \"wire-1\")\n\t)\n\t(label \"TARGET\"\n\t\t(at 10.03 0 0)\n\t\t(effects (font (size 1.27 1.27)))\n\t\t(uuid \"label-1\")\n\t)\n)\n",
+        )
+        .unwrap();
+
+        let result = handle_fix_connectivity(
+            &json!({
+                "schematic": path.display().to_string(),
+                "snap_tolerance": 0.05
+            }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("(pts (xy 0 0) (xy 10.03 0))"));
+        assert!(konnect_sexp::parse_sexp(&after).is_ok());
+    }
 }
