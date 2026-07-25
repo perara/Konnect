@@ -7,7 +7,7 @@ use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, require_str, ToolContext, ToolDef};
 use konnect_sexp::parser::{parse_sexp, SexpNode};
-use konnect_sexp::writer::write_atomic;
+use konnect_sexp::writer::{find_block_starts, write_atomic};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -827,43 +827,21 @@ fn global_sym_lib_table() -> PathBuf {
 
 /// Parse a lib-table S-expression and return list of (nickname, uri, type) tuples.
 fn parse_lib_table(content: &str) -> Vec<serde_json::Value> {
-    let mut libs = Vec::new();
-    // Each entry: (lib (name "NICK") (type "...") (uri "...") (options "") (descr "..."))
-    let mut pos = 0;
-    while let Some(lib_start) = content[pos..].find("\n  (lib ").map(|i| pos + i) {
-        // Find the end of this lib block
-        let inner_start = lib_start + 2; // skip "\n  "
-        let mut depth = 0i32;
-        let mut end = inner_start;
-        for (i, ch) in content[inner_start..].char_indices() {
-            match ch {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = inner_start + i + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let block = &content[inner_start..end];
-
-        let nickname = extract_sexp_string(block, "name").unwrap_or_default();
-        let uri = extract_sexp_string(block, "uri").unwrap_or_default();
-        let lib_type = extract_sexp_string(block, "type").unwrap_or_default();
-        let descr = extract_sexp_string(block, "descr").unwrap_or_default();
-
-        libs.push(json!({
-            "nickname": nickname,
-            "uri": uri,
-            "type": lib_type,
-            "description": descr
-        }));
-        pos = end;
-    }
-    libs
+    let Ok(parsed) = parse_sexp(content) else {
+        return Vec::new();
+    };
+    parsed
+        .find_all("lib")
+        .into_iter()
+        .map(|library| {
+            json!({
+                "nickname": library.find_str("name").unwrap_or_default(),
+                "uri": library.find_str("uri").unwrap_or_default(),
+                "type": library.find_str("type").unwrap_or_default(),
+                "description": library.find_str("descr").unwrap_or_default()
+            })
+        })
+        .collect()
 }
 
 /// Extract a quoted string value from `(key "value")` within a block.
@@ -1671,7 +1649,7 @@ async fn handle_get_footprint_info(
     });
 
     // Count pads
-    let pad_count = content.matches("\n  (pad ").count();
+    let pad_count = find_block_starts(&content, "pad").len();
 
     // Extract courtyard bbox (gr_poly on B.CrtYd or F.CrtYd) — simplified
     let has_courtyard = content.contains("B.CrtYd") || content.contains("F.CrtYd");
@@ -1707,28 +1685,11 @@ async fn handle_search_footprints(
     if fp_lib_table_path.exists() {
         let tc = tokio::fs::read_to_string(&fp_lib_table_path).await?;
 
-        // Parse lib entries
-        let mut search = tc.as_str();
-        'outer: while let Some(lib_pos) = search.find("\n  (lib ") {
-            let block_start = lib_pos + 3;
-            let mut depth = 0i32;
-            let mut block_end = block_start;
-            for (i, ch) in search[block_start..].char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            block_end = block_start + i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let block = &search[block_start..block_end];
-            let nickname = extract_sexp_string(block, "name").unwrap_or_default();
-            let uri = extract_sexp_string(block, "uri").unwrap_or_default();
+        // Parse lib entries structurally so both KiCAD's tab indentation and
+        // Konnect's generated space indentation work.
+        'outer: for library in parse_lib_table(&tc) {
+            let nickname = library["nickname"].as_str().unwrap_or_default();
+            let uri = library["uri"].as_str().unwrap_or_default();
 
             if !uri.starts_with("${") {
                 let dir = PathBuf::from(uri);
@@ -1754,8 +1715,6 @@ async fn handle_search_footprints(
                     }
                 }
             }
-
-            search = &search[lib_pos + 1..];
         }
     }
 
@@ -1895,6 +1854,17 @@ mod tests {
             w,
             h,
         }
+    }
+
+    #[test]
+    fn parse_lib_table_accepts_kicad_tab_indentation() {
+        let content = "(fp_lib_table\n\t(version 7)\n\t(lib\n\t\t(name \"ProjectParts\")\n\t\t(type \"KiCad\")\n\t\t(uri \"${KIPRJMOD}/parts.pretty\")\n\t\t(options \"\")\n\t\t(descr \"Project-local parts\")\n\t)\n)\n";
+        let libraries = parse_lib_table(content);
+        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries[0]["nickname"], "ProjectParts");
+        assert_eq!(libraries[0]["type"], "KiCad");
+        assert_eq!(libraries[0]["uri"], "${KIPRJMOD}/parts.pretty");
+        assert_eq!(libraries[0]["description"], "Project-local parts");
     }
 
     #[test]

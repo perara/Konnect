@@ -18,6 +18,7 @@ use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, require_str, ToolContext, ToolDef};
 use anyhow::{bail, Context};
+use konnect_sexp::writer::{find_enclosing_direct_child_block, write_atomic};
 use serde_json::json;
 use std::io::Write;
 use std::path::PathBuf;
@@ -1009,10 +1010,18 @@ async fn handle_enrich_datasheets(
                             .find(&lcsc_pat)
                             .map(|i| i + search_from)
                         {
-                            // Find the enclosing symbol block
-                            let before = &new_content[..lcsc_pos];
-                            if let Some(sym_start) = before.rfind("\n  (symbol") {
-                                let sym_block = &new_content[sym_start..];
+                            // Only edit top-level placed symbols. The same LCSC
+                            // property may also occur in nested lib_symbols.
+                            if let Some((sym_start, sym_end)) = find_enclosing_direct_child_block(
+                                &new_content,
+                                "kicad_sch",
+                                lcsc_pos,
+                            ) {
+                                let sym_block = &new_content[sym_start..sym_end];
+                                if !sym_block.starts_with("(symbol") {
+                                    search_from = lcsc_pos + 1;
+                                    continue;
+                                }
                                 // Find Datasheet property within this symbol
                                 let ds_pat = r#"(property "Datasheet" ""#;
                                 if let Some(ds_offset) = sym_block.find(ds_pat) {
@@ -1041,7 +1050,7 @@ async fn handle_enrich_datasheets(
 
     // Write back if anything changed
     if enriched > 0 {
-        konnect_sexp::writer::write_atomic(&sch_path, &new_content)?;
+        write_atomic(&sch_path, &new_content)?;
     }
 
     Ok(CallToolResult::text(

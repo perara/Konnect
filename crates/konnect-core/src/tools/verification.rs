@@ -6,7 +6,7 @@
 use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, require_str, ToolContext, ToolDef};
-use konnect_sexp::writer::write_atomic;
+use konnect_sexp::writer::{find_balanced_block, find_block_starts, write_atomic};
 use serde_json::json;
 use tokio::task;
 
@@ -597,27 +597,11 @@ async fn handle_copy_routing_pattern(
 /// Returns (start, end, type) tuples.
 fn find_routing_blocks(content: &str) -> Vec<(usize, usize, &'static str)> {
     let mut results = Vec::new();
-    for (prefix, kind) in &[("\n  (segment ", "segment"), ("\n  (via ", "via")] {
-        let mut pos = 0;
-        while let Some(found) = content[pos..].find(prefix) {
-            let start = pos + found + 3; // skip \n
-            let mut depth = 0i32;
-            let mut end = start;
-            for (i, ch) in content[start..].char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = start + i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
+    for (tag, kind) in &[("segment", "segment"), ("via", "via")] {
+        for start in find_block_starts(content, tag) {
+            if let Some((block_start, block_end)) = find_balanced_block(content, start) {
+                results.push((block_start, block_end, *kind));
             }
-            results.push((start, end, *kind));
-            pos = start + 1;
         }
     }
     results

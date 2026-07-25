@@ -13,7 +13,7 @@
 //!   6. Labels (net_label, global_label, hierarchical_label)
 //!   7. Symbol instances (ALWAYS LAST)
 
-use konnect_sexp::writer::write_atomic;
+use konnect_sexp::writer::{find_direct_child_blocks, write_atomic};
 use std::path::Path;
 use tracing::debug;
 
@@ -40,6 +40,16 @@ pub struct SchematicBuilder {
     pub labels: Vec<String>,
     /// Symbol instances — ALWAYS serialized last
     pub symbols: Vec<String>,
+}
+
+fn sexp_tag(block: &str) -> &str {
+    let Some(after_open) = block.strip_prefix('(') else {
+        return "";
+    };
+    let end = after_open
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .unwrap_or(after_open.len());
+    &after_open[..end]
 }
 
 impl Default for SchematicBuilder {
@@ -90,158 +100,55 @@ impl SchematicBuilder {
             symbols: Vec::new(),
         };
 
-        // Extract header (everything up to and including the line before lib_symbols or first element)
-        let header_end = content
-            .find("\n\t(lib_symbols")
-            .or_else(|| content.find("\n  (lib_symbols"))
-            .or_else(|| content.find("\n  (wire"))
-            .or_else(|| content.find("\n  (symbol"))
-            .unwrap_or(content.len());
-        builder.header = content[..header_end].to_string();
+        let root_children = find_direct_child_blocks(content, "kicad_sch");
+        let first_payload = root_children
+            .iter()
+            .find(|&&(start, end)| {
+                !matches!(
+                    sexp_tag(&content[start..end]),
+                    "version"
+                        | "generator"
+                        | "generator_version"
+                        | "uuid"
+                        | "paper"
+                        | "title_block"
+                )
+            })
+            .map(|&(start, _)| start)
+            .unwrap_or_else(|| content.rfind(')').unwrap_or(content.len()));
+        builder.header = content[..first_payload].trim_end().to_string();
 
-        // Extract lib_symbols contents
-        if let Some(ls_start) = content.find("(lib_symbols") {
-            let mut depth = 0i32;
-            let mut ls_end = ls_start;
-            for (i, ch) in content[ls_start..].char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            ls_end = ls_start + i + 1;
-                            break;
+        for (start, end) in root_children {
+            let block = &content[start..end];
+            match sexp_tag(block) {
+                "lib_symbols" => {
+                    for (sym_start, sym_end) in find_direct_child_blocks(block, "lib_symbols") {
+                        let symbol = &block[sym_start..sym_end];
+                        if sexp_tag(symbol) == "symbol" {
+                            builder.lib_symbols.push(symbol.trim().to_string());
                         }
                     }
-                    _ => {}
                 }
-            }
-            let ls_content = &content[ls_start..ls_end];
-
-            // Extract individual symbol definitions from inside lib_symbols
-            let inner_start = ls_content.find('\n').unwrap_or(0) + 1;
-            let inner_end = ls_content.rfind(')').unwrap_or(ls_content.len());
-            let inner = &ls_content[inner_start..inner_end];
-
-            // Split into individual (symbol ...) blocks
-            let mut pos = 0;
-            while let Some(sym_start) = inner[pos..]
-                .find("\t\t(symbol ")
-                .or_else(|| inner[pos..].find("(symbol "))
-            {
-                let abs = pos + sym_start;
-                // Find the matching close paren
-                let block_start = if inner[abs..].starts_with('\t') {
-                    abs + inner[abs..].find('(').unwrap_or(0)
-                } else {
-                    abs
-                };
-                let mut d = 0i32;
-                let mut block_end = block_start;
-                for (i, ch) in inner[block_start..].char_indices() {
-                    match ch {
-                        '(' => d += 1,
-                        ')' => {
-                            d -= 1;
-                            if d == 0 {
-                                block_end = block_start + i + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
+                "junction" => builder.junctions.push(block.to_string()),
+                "no_connect" => builder.no_connects.push(block.to_string()),
+                "wire" => builder.wires.push(block.to_string()),
+                "bus" => builder.buses.push(block.to_string()),
+                "bus_entry" => builder.bus_entries.push(block.to_string()),
+                "text" => builder.texts.push(block.to_string()),
+                "net_label" | "global_label" | "hierarchical_label" | "label" => {
+                    builder.labels.push(block.to_string())
                 }
-                builder
-                    .lib_symbols
-                    .push(inner[block_start..block_end].trim().to_string());
-                pos = block_end;
-            }
-        }
-
-        // Scan the entire file for top-level elements.
-        // Top-level elements start with "\n  (" (newline + 2 spaces + open paren).
-        // We skip anything inside (lib_symbols ...) since those are already extracted above.
-
-        // Find the end of lib_symbols to know what to skip
-        let ls_end = if let Some(ls) = content.find("(lib_symbols") {
-            let mut depth = 0i32;
-            let mut end = ls;
-            for (i, ch) in content[ls..].char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = ls + i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
+                "symbol" => builder.symbols.push(block.to_string()),
+                "version" | "generator" | "generator_version" | "uuid" | "paper"
+                | "title_block" => {}
+                elem_type => {
+                    debug!(
+                        "[SchematicBuilder] Unknown element type: '{}', block len: {}",
+                        elem_type,
+                        block.len()
+                    );
+                    builder.texts.push(block.to_string());
                 }
-            }
-            end
-        } else {
-            0
-        };
-
-        let mut pos = ls_end;
-        while pos < content.len() {
-            // Find next "\n  (" pattern
-            let next = content[pos..].find("\n  (").map(|i| pos + i + 1);
-
-            if let Some(elem_start) = next {
-                // Extract element type from "(type_name ..." or "(type_name\n..."
-                let paren_pos = content[elem_start..].find('(').unwrap_or(0) + elem_start;
-                let after_paren = paren_pos + 1;
-                let type_end = content[after_paren..]
-                    .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
-                    .map(|i| after_paren + i)
-                    .unwrap_or(after_paren);
-                let elem_type = &content[after_paren..type_end];
-
-                // Find the balanced close paren
-                let mut depth = 0i32;
-                let mut elem_end = paren_pos;
-                for (i, ch) in content[paren_pos..].char_indices() {
-                    match ch {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                elem_end = paren_pos + i + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                let block = content[paren_pos..elem_end].to_string();
-
-                match elem_type {
-                    "junction" => builder.junctions.push(block),
-                    "no_connect" => builder.no_connects.push(block),
-                    "wire" => builder.wires.push(block),
-                    "bus" => builder.buses.push(block),
-                    "bus_entry" => builder.bus_entries.push(block),
-                    "text" => builder.texts.push(block),
-                    "net_label" | "global_label" | "hierarchical_label" | "label" => {
-                        builder.labels.push(block)
-                    }
-                    "symbol" => builder.symbols.push(block),
-                    _ => {
-                        debug!(
-                            "[SchematicBuilder] Unknown element type: '{}', block len: {}",
-                            elem_type,
-                            block.len()
-                        );
-                        builder.texts.push(block);
-                    }
-                }
-
-                pos = elem_end;
-            } else {
-                break;
             }
         }
 
@@ -454,5 +361,35 @@ mod tests {
         assert!(output.contains("(wire"));
         assert!(output.contains("(net_label"));
         assert!(output.contains("(symbol"));
+    }
+
+    #[test]
+    fn parse_handles_eeschema_tab_indentation_without_promoting_nested_symbols() {
+        let input = "(kicad_sch\n\t(version 20260306)\n\t(generator \"eeschema\")\n\t(generator_version \"10.0\")\n\t(uuid \"root\")\n\t(paper \"A4\")\n\t(lib_symbols\n\t\t(symbol \"Device:R\"\n\t\t\t(symbol \"R_0_1\" (rectangle (start -1 -1) (end 1 1)))\n\t\t)\n\t)\n\t(wire\n\t\t(pts (xy 10 10) (xy 20 10))\n\t\t(uuid \"wire\")\n\t)\n\t(symbol\n\t\t(lib_id \"Device:R\")\n\t\t(at 20 10 0)\n\t\t(uuid \"placed\")\n\t)\n\t(sheet_instances (path \"/\" (page \"1\")))\n)\n";
+
+        let builder = SchematicBuilder::parse(input).unwrap();
+        assert_eq!(builder.lib_symbols.len(), 1);
+        assert_eq!(builder.wires.len(), 1);
+        assert_eq!(builder.symbols.len(), 1);
+        assert!(
+            builder
+                .texts
+                .iter()
+                .any(|block| block.starts_with("(sheet_instances")),
+            "unknown root items must be retained, not swallowed into the header"
+        );
+
+        let output = builder.to_string();
+        assert_eq!(output.matches("(lib_id \"Device:R\")").count(), 1);
+        assert!(konnect_sexp::parse_sexp(&output).is_ok());
+    }
+
+    #[test]
+    fn parse_header_only_schematic_does_not_duplicate_root_close() {
+        let input =
+            "(kicad_sch\n\t(version 20260306)\n\t(generator \"eeschema\")\n\t(uuid \"root\")\n)\n";
+        let output = SchematicBuilder::parse(input).unwrap().to_string();
+        assert!(konnect_sexp::parse_sexp(&output).is_ok());
+        assert_eq!(output.matches("(kicad_sch").count(), 1);
     }
 }
