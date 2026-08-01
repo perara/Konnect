@@ -4,20 +4,6 @@ The schematic viewer has two separately built front ends and one shared file
 transaction layer. The native Vello build is the real-time editor. The default
 compatibility build remains a KiCad-rendered reference viewer.
 
-## Screenshots
-
-### Hierarchy overview and page filmstrip
-
-![Schematic Studio hierarchy overview with page thumbnails](images/schematic-studio/hierarchy-overview.png)
-
-### High-contrast dark theme
-
-![Schematic Studio high-contrast dark theme](images/schematic-studio/high-contrast-dark.png)
-
-### Staged edit, properties, and change timeline
-
-![Schematic Studio showing a staged move and its timeline entry](images/schematic-studio/staged-edit-timeline.png)
-
 ## Renderer modes
 
 | Feature | Purpose | Runtime dependencies |
@@ -151,8 +137,17 @@ The native editor is split along mutation and frame-time boundaries:
 - `konnect-sexp::command` owns typed item-level mutations and conflict-aware
   rebasing, while `konnect-sexp::transaction` owns durable multi-file commit and
   recovery;
-- `vello_app` is the window, event, modal, background-worker, and composition
-  layer. It does not serialize schematic mutations directly.
+- `vello_app` owns application/window lifecycle, shared state, and event
+  dispatch;
+- `vello_ui` owns theme, icons, native text, and text-selection primitives;
+- `vello_interaction` owns selection, drag, search, wiring, property, modal,
+  and history controllers;
+- `vello_panels` owns reload reconciliation and panel/frame UI composition;
+- `vello_runtime` owns reload workers, compatibility fallback, headless
+  rendering, and benchmark CLI handling;
+- `vello_frame` owns schematic and selection overlay composition.
+
+The UI modules do not serialize schematic mutations or perform durable writes.
 
 This keeps parsing and mutation testable without a GPU or window, and keeps the
 frame encoder independent of editor state.
@@ -284,30 +279,14 @@ The renderer comparison scripts support strict same-Vello semantic comparisons
 and broader cross-rasterizer image diffs. See the root README for the current
 environment variables and golden fixture commands.
 
-### Acceptance evidence (2026-07-26)
-
-| Check | Result |
-|---|---|
-| Full Konnect workspace tests | Pass, including 179 `konnect-core` tests and protocol/integration suites |
-| Shared command/parser tests | Pass: 68 unit tests, 8 property tests, and doc tests |
-| Native viewer/editor tests | Pass: 86 tests, including commit-only staging, explicit durable commit, external-write refusal, compact edit controls, icon classification/encoding, Unicode-safe text selection, movable diagnostics persistence, connected-wire conflict, dark-theme contrast, settings persistence, and a 129-page synthetic hierarchy |
-| Compatibility viewer tests | Pass: 21 tests |
-| Strict Clippy (`-D warnings`) | Pass for shared core/command crates and native viewer |
-| Windows native cross-check | `x86_64-pc-windows-gnu` passes |
-| macOS native cross-check | `x86_64-apple-darwin` passes |
-| Linux Wayland smoke | Real five-page BMS hierarchy stayed live with no renderer/startup error |
-| Linux X11/XWayland smoke | Forced X11 run stayed live; direct window capture populated and sharp |
-| KiCad parity project check | All four positioned child sheets have same-Vello semantic RMSE 0 against KiCad 10.0.5 SVG. The root sheet reports 0.000383739 solely in a 116 x 8 pixel strip at the page origin, where its existing visible `Sheetname` and `Sheetfile` fields lack positions and KiCad plots them on top of one another. Cross-rasterizer RMSE ranges 0.00309187–0.00714131. |
-| Headless full-page render | 2970×2100 BMS primary sheet completed in 2.34 s in a debug build using deterministic CPU Vello |
-| Release responsiveness benchmark | Five-page BMS: active-sheet parse/encode p95 0.664 ms; full hierarchy parse/encode p95 317.764 ms over 20 iterations |
-
-The headless timing is a reproducibility baseline, not the interactive latency:
-the live window uses GPU Vello and caches already encoded scenes. Release-mode
-latency is machine-readable through `KONNECT_BENCH`; CI can enforce
-`KONNECT_MAX_ACTIVE_P95_MS` and `KONNECT_MAX_HIERARCHY_P95_MS`. Native CI also
-constructs, discovers, parses, and renders the semantic scenes for a synthetic
-129-page hierarchy, preventing hierarchy-scale regressions from hiding behind
-the small golden fixtures.
+Record performance numbers, project parity results, screenshots, and interactive
+Wayland/X11 observations only from the final rebased implementation, together
+with the input project, KiCad version, platform, command, and output artifact.
+The live window uses GPU Vello and caches encoded scenes, while headless
+comparisons use a deterministic CPU path; do not present one as evidence for the
+other. `KONNECT_BENCH` emits machine-readable latency data, and CI can enforce
+`KONNECT_MAX_ACTIVE_P95_MS` and `KONNECT_MAX_HIERARCHY_P95_MS` when a reviewed
+baseline is supplied.
 
 ## Current boundaries
 

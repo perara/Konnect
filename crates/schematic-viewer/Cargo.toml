@@ -56,8 +56,8 @@ serde_json = { version = "1", optional = true }
 konnect-schematic-editor = { path = "../konnect-schematic-editor", optional = true }
 konnect-sexp = { path = "../konnect-sexp", optional = true }
 
-# Optional native renderer. Vello 0.7 is the newest release that preserves
-# this crate's Rust 1.88 MSRV; Vello 0.8 raised it to Rust 1.92.
+# Optional native renderer. Version changes are deliberate because they can
+# alter golden rendering and the workspace toolchain requirement.
 anyhow = { version = "1", optional = true }
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"], optional = true }
 fontdb = { version = "0.23", optional = true }

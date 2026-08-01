@@ -159,13 +159,17 @@ WebKitGTK/driver stack has fixed its DMA-BUF path.
 ### Native Vello renderer
 
 The native renderer selects Wayland or X11 through winit and selects Vulkan, Metal,
-Direct3D 12, or another supported graphics backend through wgpu. On Linux, force the
-window backend only when diagnosing a compositor problem:
+Direct3D 12, or another supported graphics backend through wgpu. Current winit
+uses the standard display variables; `WINIT_UNIX_BACKEND` was removed in winit
+0.29. To isolate a compositor problem, launch from a session that exposes only
+the intended display socket:
 
 ```bash
-WINIT_UNIX_BACKEND=wayland schematic-viewer path/to/design.kicad_sch
-WINIT_UNIX_BACKEND=x11 schematic-viewer path/to/design.kicad_sch
+env -u DISPLAY WAYLAND_DISPLAY="$WAYLAND_DISPLAY" schematic-viewer path/to/design.kicad_sch
+env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY" schematic-viewer path/to/design.kicad_sch
 ```
+
+See [LINUX.md](LINUX.md) for build dependencies and exact validation commands.
 
 Set `RUST_LOG=wgpu_core=info,wgpu_hal=info` before launching to inspect adapter and
 surface selection. The native feature currently requires a usable GPU adapter; use

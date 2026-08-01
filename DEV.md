@@ -108,7 +108,12 @@ Konnect/
 │       ├── capabilities/default.json # Tauri 2 ACL grant (core:default) — without it event.listen() is silently denied
 │       ├── src/webview.rs            # Snapshot-isolated incremental kicad-cli SVG rendering + Tauri commands
 │       ├── src/native_scene.rs       # Backend-neutral semantic schematic scene and targeted edits
-│       ├── src/vello_app.rs          # Native winit/Vello renderer, watcher, filmstrip, interaction
+│       ├── src/vello_app.rs          # Native application/window lifecycle and event dispatch
+│       ├── src/vello_ui.rs           # Theme, icons, native text, and selection primitives
+│       ├── src/vello_interaction.rs  # Edit, selection, search, wiring, and modal controllers
+│       ├── src/vello_panels.rs       # Reload reconciliation and panel/frame UI composition
+│       ├── src/vello_runtime.rs      # Workers, fallback, headless render, and benchmark CLI
+│       ├── src/vello_frame.rs        # Schematic and selection overlay composition
 │       └── frontend/index.html       # Compatibility-mode pan/zoom SVG viewer and filmstrip
 │
 ├── plugin/                           # Python thin launcher (runs inside KiCAD)
@@ -292,8 +297,9 @@ watch-directory, render-snapshot, event-debounce, and incremental-render-selecti
 `files_needing_render`, `render_all`'s error handling) — the actual `kicad-cli` subprocess call
 and Tauri command/event plumbing stay thin and untested, matching this codebase's existing
 convention for other `kicad-cli`-calling code. CI tests compatibility mode on
-Windows and the native Vello mode on Ubuntu; release packaging continues to build
-the platform compatibility binary.
+Windows, compile-checks native Vello on Linux, Windows, and macOS, and runs the
+native tests and static gates on Linux. Release packaging continues to build the
+platform compatibility binary.
 
 Run the native renderer tests separately:
 
@@ -330,12 +336,12 @@ one-channel, one-pixel GPU race at primitive overlaps. Use
 ## CI and release gates
 
 - `.github/workflows/ci.yml` checks the workspace on Linux, Windows, and macOS,
-  tests the compatibility viewer on Windows, and tests, lints, formats, and
-  documents the native Vello renderer on Ubuntu.
-- `.github/workflows/e2e-kicad.yml` runs on pull requests, weekly, release tags,
-  and manual dispatch. It installs KiCad 10, its standard libraries, and demos on
-  Ubuntu, then runs the real CLI design loop, 115-file demo conformance,
-  Unix-socket IPC transport regressions, and live PCB Editor IPC tests under Xvfb.
+  tests the compatibility viewer on Windows, compile-checks native Vello on all
+  three platforms, and tests, lints, formats, and documents Vello on Linux.
+- `.github/workflows/e2e-kicad.yml` runs weekly, on release tags, and by manual
+  dispatch; it does not run per pull request. It installs pinned KiCad 10 on
+  Windows, then runs the real CLI design loop, demo conformance, IPC transport
+  regressions, and live PCB Editor IPC tests.
 - `.github/workflows/release.yml` builds the Linux server and viewer on Debian 12,
   validates the Linux PCM package, and gates the ELF binaries with
   `packaging/check-linux-compat.sh`.

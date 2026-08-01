@@ -242,10 +242,10 @@ saving and remains the fidelity reference. Native mode avoids the SVG/WebView pa
 keeps parsed geometry cached, and repaints immediately. It renders schematic text
 with KiCad's Newstroke geometry and has a headless golden-image comparison path.
 Light mode follows KiCad's palette and default worksheet; dark mode uses
-role-distinct high-contrast colors. The supported primitive set is pixel-identical
-to KiCad's exported scene when both are rasterized by Vello;
-unsupported or less-common schematic primitives are why native mode remains
-opt-in.
+role-distinct high-contrast colors. Minimal golden fixtures enforce exact
+same-Vello semantic output. Broader project comparisons remain an explicit
+acceptance gate because unsupported or less-common schematic primitives are why
+native mode remains opt-in.
 
 Compatibility exports also populate an atomic per-user cache under
 `$XDG_CACHE_HOME/konnect/schematic-viewer` (or the platform-equivalent user cache).
@@ -290,16 +290,18 @@ The golden test script enforces zero same-Vello semantic RMSE for the minimal
 page and wire fixtures, so exact primitives cannot silently regress while
 broader schematic coverage is being completed.
 
-On Linux, both modes select native Wayland or X11 from the desktop session. The
-compatibility mode disables WebKitGTK's failure-prone DMA-BUF renderer by default;
-an explicit `WEBKIT_DISABLE_DMABUF_RENDERER` value is respected.
+On Linux, both modes can use Wayland or X11. See [the Linux build and runtime
+guide](docs/LINUX.md) for dependencies, backend selection, and the distinction
+between compile-time coverage and interactive validation. The compatibility mode
+disables WebKitGTK's failure-prone DMA-BUF renderer by default; an explicit
+`WEBKIT_DISABLE_DMABUF_RENDERER` value is respected.
 
 ## Requirements
 
-- KiCAD 10 (Windows is the most-tested platform; macOS works from the release
-  binaries or a source build — see the [macOS section](#macos) above. Linux
-  compiles and passes tests in CI but hasn't had per-platform QA yet; both are
-  tracked on the [roadmap](ROADMAP.md))
+- KiCAD 10 for workflows that export, check, or use compatibility rendering.
+  The native Vello renderer does not require KiCad at runtime. CI compile-checks
+  Vello on Linux, Windows, and macOS; this does not imply interactive runtime
+  validation on every platform.
 - `kicad-cli` (ships with KiCAD — used for exports, ERC, DRC)
 - For PCB tools: KiCAD running with the target board open (IPC API)
 
