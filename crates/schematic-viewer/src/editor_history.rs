@@ -9,12 +9,19 @@ use std::path::PathBuf;
 pub(crate) struct HistoryEntry {
     pub(crate) journal_root: Option<PathBuf>,
     pub(crate) commands: Vec<HistoryCommand>,
+    pub(crate) creations: Vec<HistoryCreation>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryCommand {
     pub(crate) file: PathBuf,
     pub(crate) command: SchematicCommand,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HistoryCreation {
+    pub(crate) file: PathBuf,
+    pub(crate) source: String,
 }
 
 #[cfg(test)]
@@ -30,6 +37,7 @@ impl HistoryEntry {
         Self {
             journal_root: None,
             commands: vec![HistoryCommand { file, command }],
+            creations: Vec::new(),
         }
     }
 
@@ -37,6 +45,19 @@ impl HistoryEntry {
         Self {
             journal_root: Some(journal_root),
             commands,
+            creations: Vec::new(),
+        }
+    }
+
+    pub(crate) fn group_with_creations(
+        journal_root: PathBuf,
+        commands: Vec<HistoryCommand>,
+        creations: Vec<HistoryCreation>,
+    ) -> Self {
+        Self {
+            journal_root: Some(journal_root),
+            commands,
+            creations,
         }
     }
 

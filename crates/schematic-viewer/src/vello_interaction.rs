@@ -2576,6 +2576,18 @@ impl VelloViewer {
                             },
                         ],
                     )
+                } else if let Some(child_source) = &child_creation {
+                    HistoryEntry::group_with_creations(
+                        parent_dir.clone(),
+                        vec![HistoryCommand {
+                            file: parent_file.clone(),
+                            command: parent_outcome.inverse,
+                        }],
+                        vec![HistoryCreation {
+                            file: child_file.clone(),
+                            source: child_source.clone(),
+                        }],
+                    )
                 } else {
                     HistoryEntry::single(parent_file.clone(), parent_outcome.inverse)
                 };
@@ -2624,7 +2636,7 @@ impl VelloViewer {
             return;
         };
 
-        if entry.journal_root.is_some() || entry.commands.len() > 1 {
+        if entry.journal_root.is_some() || entry.commands.len() > 1 || !entry.creations.is_empty() {
             self.apply_grouped_history(undoing, entry);
             return;
         }
@@ -2720,11 +2732,28 @@ impl VelloViewer {
             });
             rendered_sources.push((part.file.clone(), replacement));
         }
+        for creation in &entry.creations {
+            let key = path_key(&creation.file);
+            let result = if undoing {
+                candidate.cancel_creation(&key, &creation.file, &creation.source)
+            } else {
+                candidate.stage_creation(key, &creation.file, creation.source.clone())
+            };
+            if let Err(error) = result {
+                self.restore_history_entry(undoing, entry.clone());
+                self.status = format!("Grouped creation history conflict: {error}");
+                return;
+            }
+        }
         self.edit_session = candidate;
         for (file, source) in rendered_sources {
             self.apply_staged_source(&file, source);
         }
-        let inverse = HistoryEntry::group(journal_root.clone(), inverses);
+        let inverse = HistoryEntry::group_with_creations(
+            journal_root.clone(),
+            inverses,
+            entry.creations.clone(),
+        );
         let timeline_uuids = inverse
             .commands
             .iter()

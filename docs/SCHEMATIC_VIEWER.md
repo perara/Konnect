@@ -92,7 +92,8 @@ redo, updates only the in-memory semantic scene and timeline. The original
 `.kicad_sch` files remain byte-identical until `Commit` is pressed. `Discard`
 restores the durable source without writing anything. Edit mode cannot be
 disabled while changes are pending, preventing an ambiguous half-finished
-session.
+session. Closing the window is likewise blocked until the staged session is
+committed or discarded, so an ordinary window-close action cannot lose edits.
 
 Dark theme uses a dedicated high-contrast palette rather than reusing KiCad's
 light-canvas colors on gray. Primary UI text has at least 7:1 contrast against
@@ -297,8 +298,8 @@ baseline is supplied.
   placed on an exact sheet border and participate in atomic undo/redo.
 - Linking a populated existing child patches its symbol instance paths in the
   same durable transaction as the parent link. Undoing a newly-created sheet
-  link removes the parent reference but deliberately retains the child file as
-  a recoverable project asset.
+  link cancels both the parent reference and the create-only child transition;
+  redo restores both parts of the staged operation.
 - The native renderer explicitly reports unsupported top-level visual constructs
   and uses per-sheet fallback when KiCad is installed.
 - Compatibility fallback is a visual layer. Hit testing, selection, edits, and

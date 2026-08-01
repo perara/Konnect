@@ -2,7 +2,7 @@
 
 use crate::change_timeline::{ChangeKind, ChangeOrigin, ChangeTimeline};
 use crate::edit_session::EditSession;
-use crate::editor_history::{HistoryCommand, HistoryEntry};
+use crate::editor_history::{HistoryCommand, HistoryCreation, HistoryEntry};
 use crate::editor_model::{
     box_selects_bounds, drag_delta_mm, kicad_lock_path, notification_matches_revision, snap_point,
     summarize_external_change,
@@ -394,6 +394,10 @@ impl VelloViewer {
     }
 }
 
+fn can_exit_without_losing_staged_edits(edit_session: &EditSession) -> bool {
+    !edit_session.has_pending()
+}
+
 pub(crate) fn run() -> Result<()> {
     run_native()
 }
@@ -478,7 +482,15 @@ impl ApplicationHandler<UserEvent> for VelloViewer {
         let height = f64::from(state.surface.config.height);
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if can_exit_without_losing_staged_edits(&self.edit_session) {
+                    event_loop.exit();
+                } else {
+                    self.status = "Close blocked · Commit or Discard staged changes before exiting"
+                        .to_owned();
+                    self.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state.valid_surface = size.width > 0 && size.height > 0;
@@ -1005,6 +1017,24 @@ mod tests {
         let left = relative_luminance(left);
         let right = relative_luminance(right);
         (left.max(right) + 0.05) / (left.min(right) + 0.05)
+    }
+
+    #[test]
+    fn close_is_blocked_until_the_staged_session_is_resolved() {
+        let mut edit_session = EditSession::default();
+        let file = PathBuf::from("child.kicad_sch");
+        let source = "(kicad_sch (uuid \"child\"))".to_owned();
+        assert!(can_exit_without_losing_staged_edits(&edit_session));
+
+        edit_session
+            .stage_creation(file.clone(), &file, source.clone())
+            .expect("stage creation");
+        assert!(!can_exit_without_losing_staged_edits(&edit_session));
+
+        edit_session
+            .cancel_creation(&file, &file, &source)
+            .expect("discard staged creation");
+        assert!(can_exit_without_losing_staged_edits(&edit_session));
     }
 
     #[test]

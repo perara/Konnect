@@ -96,6 +96,25 @@ impl EditSession {
         Ok(())
     }
 
+    pub(crate) fn cancel_creation(
+        &mut self,
+        key: &Path,
+        file: &Path,
+        expected: &str,
+    ) -> Result<(), SexpError> {
+        let matches_staged_creation = self.documents.get(key).is_some_and(|document| {
+            document.base.is_none() && document.file == file && document.staged == expected
+        });
+        if !matches_staged_creation {
+            return Err(SexpError::Conflict {
+                path: file.to_path_buf(),
+            });
+        }
+        self.documents.remove(key);
+        self.conflicted.remove(key);
+        Ok(())
+    }
+
     pub(crate) fn staged_source(&self, key: &Path) -> Option<&str> {
         self.documents
             .get(key)
@@ -260,5 +279,76 @@ mod tests {
 
         assert!(!session.has_pending());
         assert!(session.transitions().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_staged_creation_removes_it_from_the_commit_plan_and_allows_redo() {
+        let mut session = EditSession::default();
+        let file = PathBuf::from("child.kicad_sch");
+        let source = source();
+        session
+            .stage_creation(file.clone(), &file, source.clone())
+            .expect("stage creation");
+
+        session
+            .cancel_creation(&file, &file, &source)
+            .expect("cancel exact creation");
+
+        assert!(!session.has_pending());
+        assert!(session.transitions().is_empty());
+        session
+            .stage_creation(file.clone(), &file, source)
+            .expect("redo creation");
+        assert_eq!(session.transitions().len(), 1);
+    }
+
+    #[test]
+    fn new_child_sheet_undo_and_redo_update_the_complete_commit_plan() {
+        let parent = PathBuf::from("root.kicad_sch");
+        let child = PathBuf::from("child.kicad_sch");
+        let parent_source = source();
+        let child_source = "(kicad_sch\n  (uuid \"child\")\n)\n".to_owned();
+        let insert = SchematicCommand::insert_item(
+            &parent_source,
+            "(sheet (at 10 10) (size 80 50) (uuid \"sheet-a\"))",
+            ItemAnchor::BeforeFooter,
+            "Add hierarchical sheet",
+        )
+        .expect("sheet command");
+        let mut session = EditSession::default();
+        let (parent_after, insert_outcome) = session
+            .stage_command(parent.clone(), &parent, &parent_source, &insert)
+            .expect("stage parent link");
+        session
+            .stage_creation(child.clone(), &child, child_source.clone())
+            .expect("stage child creation");
+        assert_eq!(session.transitions().len(), 2);
+
+        let (parent_restored, undo_outcome) = session
+            .stage_command(
+                parent.clone(),
+                &parent,
+                &parent_after,
+                &insert_outcome.inverse,
+            )
+            .expect("undo parent link");
+        session
+            .cancel_creation(&child, &child, &child_source)
+            .expect("undo child creation");
+        assert_eq!(parent_restored, parent_source);
+        assert!(session.transitions().is_empty());
+
+        session
+            .stage_command(
+                parent.clone(),
+                &parent,
+                &parent_restored,
+                &undo_outcome.inverse,
+            )
+            .expect("redo parent link");
+        session
+            .stage_creation(child.clone(), &child, child_source)
+            .expect("redo child creation");
+        assert_eq!(session.transitions().len(), 2);
     }
 }
