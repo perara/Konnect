@@ -147,6 +147,62 @@ pub fn resolve_lib_symbol_flattened(lib_id: &str) -> Option<String> {
     resolve_lib_symbol_flattened_node(lib_id).map(|n| crate::sexp::writer::write(&n))
 }
 
+/// Resolve and flatten one symbol from an explicitly supplied library body.
+///
+/// This is the source-specific counterpart to [`resolve_lib_symbol_flattened`]:
+/// callers choose the authoritative `.kicad_sym` file instead of consulting
+/// KiCad's configured library search path. Derived symbols are flattened using
+/// parents from that same file, and broken or cyclic inheritance fails closed.
+pub fn flatten_symbol_from_library(
+    content: &str,
+    library_name: &str,
+    symbol_name: &str,
+) -> Result<String, String> {
+    let root =
+        parser::parse(content).map_err(|error| format!("invalid symbol library: {error}"))?;
+    if root.tag() != Some("kicad_symbol_lib") {
+        return Err("source file is not a kicad_symbol_lib document".to_string());
+    }
+    let mut node = root
+        .find_all("symbol")
+        .into_iter()
+        .find(|symbol| symbol.value() == Some(symbol_name))
+        .cloned()
+        .ok_or_else(|| format!("symbol '{symbol_name}' was not found in the source library"))?;
+    if let SexpNode::List(children) = &mut node {
+        children[1] = SexpNode::Str(format!("{library_name}:{symbol_name}"));
+    }
+
+    let mut parent_name = node.get_value("extends").map(str::to_string);
+    if parent_name.is_none() {
+        return Ok(crate::sexp::writer::write(&node));
+    }
+    if let SexpNode::List(children) = &mut node {
+        children.retain(|child| child.tag() != Some("extends"));
+    }
+
+    let mut visited = std::collections::HashSet::from([symbol_name.to_string()]);
+    while let Some(name) = parent_name {
+        if !visited.insert(name.clone()) {
+            return Err(format!(
+                "symbol '{symbol_name}' has a cyclic extends chain at '{name}'"
+            ));
+        }
+        let parent = root
+            .find_all("symbol")
+            .into_iter()
+            .find(|symbol| symbol.value() == Some(name.as_str()))
+            .ok_or_else(|| {
+                format!(
+                    "symbol '{symbol_name}' extends missing parent '{name}' in the source library"
+                )
+            })?;
+        merge_parent_into_child(&mut node, parent, &name, symbol_name);
+        parent_name = parent.get_value("extends").map(str::to_string);
+    }
+    Ok(crate::sexp::writer::write(&node))
+}
+
 /// Copy one parent level into a derived symbol: unit sub-symbols renamed to
 /// the child's base name, plus properties / attribute nodes the child does
 /// not define itself (most-derived wins, matching eeschema's inheritance).

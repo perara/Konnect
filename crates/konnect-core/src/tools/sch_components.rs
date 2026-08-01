@@ -19,8 +19,8 @@ use konnect_sexp::{
         extract_lib_pins_for_unit, extract_symbol_instances, pin_endpoint, read_schematic,
     },
     writer::{
-        apply_edits, new_uuid, read_consistent, write_atomic_if_unchanged, write_new_atomic,
-        SexpEdit,
+        apply_edits, find_direct_child_blocks, new_uuid, read_consistent,
+        write_atomic_if_unchanged, write_new_atomic, SexpEdit,
     },
     ItemId, SchematicCommand,
 };
@@ -274,6 +274,22 @@ pub fn tools() -> Vec<ToolDef> {
             |args, ctx| async move { handle_replace_component(args, ctx).await }
         ),
         tool!(
+            "sync_embedded_symbol_from_library",
+            "Refresh one embedded symbol definition from an authoritative .kicad_sym library. \
+             Only the cached definition changes; instances, fields, units, references, and \
+             wiring remain untouched.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "schematic": { "type": "string", "description": "Path to .kicad_sch file" },
+                    "lib_id": { "type": "string", "description": "Qualified Library:Symbol identifier" },
+                    "library_path": { "type": "string", "description": "Authoritative .kicad_sym library file" }
+                },
+                "required": ["schematic", "lib_id", "library_path"]
+            }),
+            |args, ctx| async move { handle_sync_embedded_symbol_from_library(args, ctx).await }
+        ),
+        tool!(
             "get_schematic_view",
             "Render the schematic to a PNG image (base64-encoded) via kicad-cli.",
             json!({
@@ -447,6 +463,100 @@ pub(crate) fn place_one_component(
         "unit": unit,
         "uuid": uuid
     }))
+}
+
+fn direct_symbol_definition(content: &str, parent_tag: &str, name: &str) -> Option<(usize, usize)> {
+    find_direct_child_blocks(content, parent_tag)
+        .into_iter()
+        .find(|&(start, end)| {
+            parse_sexp(&content[start..end]).ok().is_some_and(|node| {
+                node.head() == Some("symbol")
+                    && node.get(1).and_then(|value| value.as_str()) == Some(name)
+            })
+        })
+}
+
+fn prepare_embedded_symbol_sync(
+    schematic: &str,
+    library: &str,
+    lib_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let (library_name, symbol_name) = lib_id
+        .split_once(':')
+        .filter(|(library_name, symbol_name)| !library_name.is_empty() && !symbol_name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("lib_id must be a qualified Library:Symbol identifier"))?;
+
+    let library_tree = parse_sexp(library)
+        .map_err(|error| anyhow::anyhow!("source symbol library is invalid: {error}"))?;
+    if library_tree.head() != Some("kicad_symbol_lib") {
+        anyhow::bail!("source file is not a kicad_symbol_lib document");
+    }
+    let replacement = cse::library::flatten_symbol_from_library(library, library_name, symbol_name)
+        .map_err(anyhow::Error::msg)?
+        .trim_end()
+        .to_string();
+
+    let schematic_tree =
+        parse_sexp(schematic).map_err(|error| anyhow::anyhow!("schematic is invalid: {error}"))?;
+    if schematic_tree.head() != Some("kicad_sch") {
+        anyhow::bail!("schematic file is not a kicad_sch document");
+    }
+    let (embedded_start, embedded_end) = direct_symbol_definition(schematic, "lib_symbols", lib_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("embedded definition '{lib_id}' was not found in the schematic")
+        })?;
+    if schematic[embedded_start..embedded_end] == replacement {
+        return Ok(None);
+    }
+
+    let mut updated = schematic.to_string();
+    updated.replace_range(embedded_start..embedded_end, &replacement);
+    parse_sexp(&updated).map_err(|error| {
+        anyhow::anyhow!("refreshed embedded symbol produced invalid S-expression: {error}")
+    })?;
+    Ok(Some(updated))
+}
+
+async fn handle_sync_embedded_symbol_from_library(
+    args: &serde_json::Value,
+    _ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let sch_path = get_path(args, "schematic")?;
+    let library_path = get_path(args, "library_path")?;
+    let lib_id = match require_str(args, "lib_id") {
+        Ok(value) => value,
+        Err(error) => return Ok(error),
+    };
+    if library_path.extension().and_then(|value| value.to_str()) != Some("kicad_sym") {
+        return Ok(CallToolResult::error(
+            "library_path must point to a .kicad_sym file",
+        ));
+    }
+    if !library_path.is_file() {
+        return Ok(CallToolResult::error(format!(
+            "symbol library '{}' does not exist or is not a regular file",
+            library_path.display()
+        )));
+    }
+
+    let authoritative = read_consistent(&library_path)?;
+    let expected = read_consistent(&sch_path)?;
+    let updated = match prepare_embedded_symbol_sync(&expected, &authoritative, lib_id) {
+        Ok(updated) => updated,
+        Err(error) => return Ok(CallToolResult::error(error.to_string())),
+    };
+    let Some(updated) = updated else {
+        return Ok(CallToolResult::json(&json!({
+            "lib_id": lib_id,
+            "changed": false
+        })));
+    };
+    write_atomic_if_unchanged(&sch_path, &expected, &updated)?;
+
+    Ok(CallToolResult::json(&json!({
+        "lib_id": lib_id,
+        "changed": true
+    })))
 }
 
 async fn handle_delete_schematic_component(
@@ -1806,5 +1916,148 @@ mod tests {
             !val_sexp.contains("hide"),
             "Value stays visible: {val_sexp}"
         );
+    }
+
+    fn sync_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("reviewed.kicad_sym");
+        let schematic = dir.path().join("sync.kicad_sch");
+        std::fs::write(
+            &library,
+            "(kicad_symbol_lib (version 20231120) (generator kicad_symbol_editor)\n  (symbol \"PART\"\n    (pin_names (offset 1.016))\n    (property \"Value\" \"AUTHORITATIVE\" (at 0 0 0))\n    (symbol \"PART_1_1\" (pin input line (at -5 0 0) (length 2.54) (name \"A\") (number \"1\")))\n    (symbol \"PART_2_1\" (pin output line (at 5 0 180) (length 2.54) (name \"B\") (number \"2\")))\n  )\n)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &schematic,
+            "(kicad_sch\n  (version 20260306)\n  (generator \"eeschema\")\n  (uuid \"root\")\n  (lib_symbols\n    (symbol \"reviewed:PART\"\n      (pin_names (offset 0))\n      (property \"Value\" \"STALE\" (at 0 0 0))\n    )\n  )\n  (symbol (lib_id \"reviewed:PART\") (at 100 80 0) (unit 1) (uuid \"instance-one\") (property \"Reference\" \"U7\" (at 100 75 0)))\n  (symbol (lib_id \"reviewed:PART\") (at 120 80 0) (unit 2) (uuid \"instance-two\") (property \"Reference\" \"U8\" (at 120 75 0)))\n  (wire (pts (xy 90 80) (xy 130 80)) (uuid \"wire-one\"))\n)\n",
+        )
+        .unwrap();
+        (dir, library, schematic)
+    }
+
+    #[tokio::test]
+    async fn sync_embedded_symbol_preserves_instances_units_fields_and_wiring_and_is_idempotent() {
+        let (_dir, library, schematic) = sync_fixture();
+        let args = json!({
+            "schematic": schematic.display().to_string(),
+            "lib_id": "reviewed:PART",
+            "library_path": library.display().to_string()
+        });
+        let first = handle_sync_embedded_symbol_from_library(&args, &test_ctx())
+            .await
+            .unwrap();
+        assert!(!first.is_error, "{first:?}");
+
+        let after = std::fs::read_to_string(&schematic).unwrap();
+        assert!(after.contains("AUTHORITATIVE"));
+        assert!(!after.contains("STALE"));
+        for preserved in [
+            "(unit 1)",
+            "(unit 2)",
+            "instance-one",
+            "instance-two",
+            "(property \"Reference\" \"U7\"",
+            "(property \"Reference\" \"U8\"",
+            "wire-one",
+        ] {
+            assert!(
+                after.contains(preserved),
+                "missing preserved data: {preserved}"
+            );
+        }
+
+        let second = handle_sync_embedded_symbol_from_library(&args, &test_ctx())
+            .await
+            .unwrap();
+        assert!(!second.is_error, "{second:?}");
+        assert_eq!(std::fs::read_to_string(&schematic).unwrap(), after);
+        assert!(content_text(&second).contains("\"changed\":false"));
+    }
+
+    #[tokio::test]
+    async fn sync_embedded_symbol_rejects_missing_and_malformed_libraries_without_writing() {
+        let (_dir, library, schematic) = sync_fixture();
+        let before = std::fs::read_to_string(&schematic).unwrap();
+        std::fs::write(&library, "(kicad_symbol_lib (symbol \"PART\")").unwrap();
+        let malformed = handle_sync_embedded_symbol_from_library(
+            &json!({
+                "schematic": schematic.display().to_string(),
+                "lib_id": "reviewed:PART",
+                "library_path": library.display().to_string()
+            }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(malformed.is_error);
+        assert_eq!(std::fs::read_to_string(&schematic).unwrap(), before);
+
+        std::fs::remove_file(&library).unwrap();
+        let missing = handle_sync_embedded_symbol_from_library(
+            &json!({
+                "schematic": schematic.display().to_string(),
+                "lib_id": "reviewed:PART",
+                "library_path": library.display().to_string()
+            }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(missing.is_error);
+        assert_eq!(std::fs::read_to_string(&schematic).unwrap(), before);
+    }
+
+    #[test]
+    fn sync_embedded_symbol_conflicts_after_a_concurrent_change() {
+        let (_dir, library, schematic) = sync_fixture();
+        let expected = std::fs::read_to_string(&schematic).unwrap();
+        let authoritative = std::fs::read_to_string(&library).unwrap();
+        let replacement = prepare_embedded_symbol_sync(&expected, &authoritative, "reviewed:PART")
+            .unwrap()
+            .unwrap();
+        std::fs::write(&schematic, "external edit").unwrap();
+        let error = write_atomic_if_unchanged(&schematic, &expected, &replacement).unwrap_err();
+        assert!(error.to_string().contains("changed"));
+        assert_eq!(
+            std::fs::read_to_string(&schematic).unwrap(),
+            "external edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_embedded_symbol_flattens_derived_library_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("derived.kicad_sym");
+        let schematic = dir.path().join("derived.kicad_sch");
+        std::fs::write(
+            &library,
+            "(kicad_symbol_lib\n  (version 20250114)\n  (generator \"eeschema\")\n  (symbol \"BASE\"\n    (property \"Reference\" \"U\" (at 0 0 0))\n    (symbol \"BASE_1_1\" (pin input line (at 0 0 0) (length 2.54) (name \"A\") (number \"1\")))\n  )\n  (symbol \"DERIVED\"\n    (extends \"BASE\")\n    (property \"Value\" \"DERIVED\" (at 0 0 0))\n  )\n)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &schematic,
+            "(kicad_sch\n  (version 20260306)\n  (generator \"eeschema\")\n  (uuid \"root\")\n  (lib_symbols (symbol \"reviewed:DERIVED\" (extends \"reviewed:BASE\")))\n  (symbol (lib_id \"reviewed:DERIVED\") (at 10 10 0) (unit 1) (uuid \"instance\") (property \"Reference\" \"U1\" (at 10 8 0)))\n)\n",
+        )
+        .unwrap();
+
+        let result = handle_sync_embedded_symbol_from_library(
+            &json!({
+                "schematic": schematic.display().to_string(),
+                "lib_id": "reviewed:DERIVED",
+                "library_path": library.display().to_string()
+            }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error, "{result:?}");
+        let after = std::fs::read_to_string(&schematic).unwrap();
+        assert!(
+            !after.contains("(extends"),
+            "derived cache stayed unresolved"
+        );
+        assert!(after.contains("DERIVED_1_1"));
+        assert!(after.contains("(number \"1\""));
+        assert!(after.contains("(property \"Reference\" \"U1\""));
     }
 }
