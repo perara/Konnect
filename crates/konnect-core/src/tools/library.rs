@@ -7,7 +7,8 @@ use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, require_str, ToolContext, ToolDef};
 use konnect_sexp::parser::{parse_sexp, SexpNode};
-use konnect_sexp::writer::{find_balanced_block, find_block_starts, write_atomic};
+use konnect_sexp::writer::{find_balanced_block, find_block_starts, read_consistent, write_atomic};
+use konnect_sexp::{commit_file_transaction, FileTransition};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -210,6 +211,21 @@ pub fn tools() -> Vec<ToolDef> {
                 "required": ["library_path"]
             }),
             |args, ctx| async move { handle_list_symbols_in_library(args, ctx).await }
+        ),
+        tool!(
+            "normalize_symbol_library",
+            "Normalize a .kicad_sym library with kicad-cli in an isolated temporary copy. \
+             Dry-run is the default; set apply=true to commit through a revision-checked \
+             durable transaction.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "library_path": { "type": "string", "description": "Path to .kicad_sym library file" },
+                    "apply": { "type": "boolean", "description": "Commit the normalized result (default false)", "default": false }
+                },
+                "required": ["library_path"]
+            }),
+            |args, ctx| async move { handle_normalize_symbol_library(args, ctx).await }
         ),
         tool!(
             "register_symbol_library",
@@ -1881,6 +1897,111 @@ async fn handle_list_symbols_in_library(
     ))
 }
 
+fn validate_symbol_library(content: &str, description: &str) -> anyhow::Result<()> {
+    let root = parse_sexp(content)
+        .map_err(|error| anyhow::anyhow!("{description} is invalid: {error}"))?;
+    if root.head() != Some("kicad_symbol_lib") {
+        anyhow::bail!("{description} is not a kicad_symbol_lib document");
+    }
+    Ok(())
+}
+
+fn commit_normalized_library(
+    library_path: &Path,
+    expected: &str,
+    normalized: &str,
+) -> anyhow::Result<()> {
+    let absolute_path = if library_path.is_absolute() {
+        library_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(library_path)
+    };
+    let project_dir = absolute_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("symbol library path has no parent directory"))?;
+    commit_file_transaction(
+        project_dir,
+        vec![FileTransition::replace(
+            &absolute_path,
+            expected,
+            normalized,
+        )],
+    )?;
+    Ok(())
+}
+
+fn finish_symbol_library_normalization(
+    library_path: &Path,
+    expected: &str,
+    normalized: &str,
+    apply: bool,
+) -> anyhow::Result<CallToolResult> {
+    if let Err(error) = validate_symbol_library(normalized, "normalized symbol library") {
+        return Ok(CallToolResult::error(error.to_string()));
+    }
+    let changed = normalized != expected;
+    if apply && changed {
+        commit_normalized_library(library_path, expected, normalized)?;
+    }
+    Ok(CallToolResult::json(&json!({
+        "apply": apply,
+        "changed": changed,
+        "committed": apply && changed
+    })))
+}
+
+async fn handle_normalize_symbol_library(
+    args: &serde_json::Value,
+    ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let library_path = get_path(args, "library_path")?;
+    if library_path.extension().and_then(|value| value.to_str()) != Some("kicad_sym") {
+        return Ok(CallToolResult::error(
+            "library_path must point to a .kicad_sym file",
+        ));
+    }
+    if !library_path.is_file() {
+        return Ok(CallToolResult::error(format!(
+            "symbol library '{}' does not exist or is not a regular file",
+            library_path.display()
+        )));
+    }
+    let apply = match args.get("apply") {
+        None => false,
+        Some(value) => match value.as_bool() {
+            Some(apply) => apply,
+            None => return Ok(CallToolResult::error("apply must be a boolean")),
+        },
+    };
+    let expected = read_consistent(&library_path)?;
+    if let Err(error) = validate_symbol_library(&expected, "source symbol library") {
+        return Ok(CallToolResult::error(error.to_string()));
+    }
+
+    let temp_dir = tempfile::tempdir()?;
+    let temp_path = temp_dir.path().join("library.kicad_sym");
+    std::fs::write(&temp_path, &expected)?;
+    let output = tokio::process::Command::new(&ctx.config.kicad_cli)
+        .arg("sym")
+        .arg("upgrade")
+        .arg("--force")
+        .arg(&temp_path)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let temp_display = temp_path.to_string_lossy();
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .replace(temp_display.as_ref(), "<temporary-library>");
+        return Ok(CallToolResult::error(format!(
+            "kicad-cli symbol-library normalization failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    let normalized = std::fs::read_to_string(&temp_path)?;
+    finish_symbol_library_normalization(&library_path, &expected, &normalized, apply)
+}
+
 async fn handle_search_symbols(
     args: &serde_json::Value,
     ctx: &ToolContext,
@@ -3440,5 +3561,123 @@ mod tests {
             konnect_sexp::parser::parse_sexp(&c).is_ok(),
             "multi-unit symbol doesn't parse"
         );
+    }
+
+    fn normalization_fixture() -> &'static str {
+        "(kicad_symbol_lib (version 20211014) (generator kicad_symbol_editor)\n  (symbol \"R_TEST\"\n    (pin_numbers hide)\n    (pin_names (offset 0))\n    (in_bom yes)\n    (on_board yes)\n    (property \"Reference\" \"R\" (id 0) (at 2.032 0 90) (effects (font (size 1.27 1.27))))\n    (property \"Value\" \"R_TEST\" (id 1) (at 0 0 90) (effects (font (size 1.27 1.27))))\n    (property \"Footprint\" \"\" (id 2) (at -1.778 0 90) (effects (font (size 1.27 1.27)) hide))\n    (property \"Datasheet\" \"~\" (id 3) (at 0 0 0) (effects (font (size 1.27 1.27)) hide))\n    (symbol \"R_TEST_0_1\"\n      (rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0) (type default)) (fill (type none)))\n    )\n    (symbol \"R_TEST_1_1\"\n      (pin passive line (at 0 3.81 270) (length 1.27) (name \"~\" (effects (font (size 1.27 1.27)))) (number \"1\" (effects (font (size 1.27 1.27)))))\n      (pin passive line (at 0 -3.81 90) (length 1.27) (name \"~\" (effects (font (size 1.27 1.27)))) (number \"2\" (effects (font (size 1.27 1.27)))))\n    )\n  )\n)\n"
+    }
+
+    #[test]
+    fn normalization_finish_is_dry_run_by_default_and_conflict_safe_on_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("normalize.kicad_sym");
+        let expected = normalization_fixture();
+        let normalized = expected.replace("20211014", "20250114");
+        std::fs::write(&library, expected).unwrap();
+
+        let dry_run =
+            finish_symbol_library_normalization(&library, expected, &normalized, false).unwrap();
+        assert!(!dry_run.is_error);
+        assert!(result_text(&dry_run).contains("\"committed\":false"));
+        assert_eq!(std::fs::read_to_string(&library).unwrap(), expected);
+
+        std::fs::write(&library, "external edit").unwrap();
+        let error =
+            finish_symbol_library_normalization(&library, expected, &normalized, true).unwrap_err();
+        assert!(error.to_string().contains("changed"));
+        assert_eq!(std::fs::read_to_string(&library).unwrap(), "external edit");
+
+        std::fs::write(&library, expected).unwrap();
+        let applied =
+            finish_symbol_library_normalization(&library, expected, &normalized, true).unwrap();
+        assert!(!applied.is_error);
+        assert!(result_text(&applied).contains("\"committed\":true"));
+        assert_eq!(std::fs::read_to_string(&library).unwrap(), normalized);
+
+        let malformed =
+            finish_symbol_library_normalization(&library, &normalized, "(kicad_symbol_lib", true)
+                .unwrap();
+        assert!(malformed.is_error);
+        assert_eq!(std::fs::read_to_string(&library).unwrap(), normalized);
+    }
+
+    #[tokio::test]
+    async fn normalize_symbol_library_rejects_missing_and_malformed_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("missing.kicad_sym");
+        let missing = handle_normalize_symbol_library(
+            &json!({ "library_path": library.display().to_string() }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(missing.is_error);
+
+        std::fs::write(&library, "(kicad_symbol_lib").unwrap();
+        let malformed = handle_normalize_symbol_library(
+            &json!({ "library_path": library.display().to_string() }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(malformed.is_error);
+        assert_eq!(
+            std::fs::read_to_string(&library).unwrap(),
+            "(kicad_symbol_lib"
+        );
+
+        std::fs::write(&library, normalization_fixture()).unwrap();
+        let invalid_apply = handle_normalize_symbol_library(
+            &json!({
+                "library_path": library.display().to_string(),
+                "apply": "yes"
+            }),
+            &test_ctx(),
+        )
+        .await
+        .unwrap();
+        assert!(invalid_apply.is_error);
+        assert_eq!(
+            std::fs::read_to_string(&library).unwrap(),
+            normalization_fixture()
+        );
+    }
+
+    #[tokio::test]
+    async fn real_kicad_cli_normalizes_fixture_in_isolation_and_is_idempotent() {
+        if std::process::Command::new("kicad-cli")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping real-kicad normalization fixture: kicad-cli unavailable");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("real.kicad_sym");
+        std::fs::write(&library, normalization_fixture()).unwrap();
+        let mut ctx = test_ctx();
+        ctx.config.kicad_cli = "kicad-cli".to_string();
+        let args = json!({ "library_path": library.display().to_string() });
+
+        let before = std::fs::read_to_string(&library).unwrap();
+        let dry_run = handle_normalize_symbol_library(&args, &ctx).await.unwrap();
+        assert!(!dry_run.is_error, "{dry_run:?}");
+        assert!(result_text(&dry_run).contains("\"changed\":true"));
+        assert_eq!(std::fs::read_to_string(&library).unwrap(), before);
+
+        let apply_args = json!({ "library_path": library.display().to_string(), "apply": true });
+        let applied = handle_normalize_symbol_library(&apply_args, &ctx)
+            .await
+            .unwrap();
+        assert!(!applied.is_error, "{applied:?}");
+        assert!(result_text(&applied).contains("\"committed\":true"));
+        let normalized = std::fs::read_to_string(&library).unwrap();
+        assert_ne!(normalized, before);
+
+        let repeat = handle_normalize_symbol_library(&args, &ctx).await.unwrap();
+        assert!(!repeat.is_error, "{repeat:?}");
+        assert!(result_text(&repeat).contains("\"changed\":false"));
+        assert_eq!(std::fs::read_to_string(&library).unwrap(), normalized);
     }
 }

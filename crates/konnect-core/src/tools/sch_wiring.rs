@@ -298,6 +298,20 @@ pub fn tools() -> Vec<ToolDef> {
             |args, ctx| async move { handle_batch_add_junction(args, ctx).await }
         ),
         tool!(
+            "normalize_schematic_junctions",
+            "Remove stale and duplicate junction dots while preserving the unique junctions \
+             required by wire T-intersections, intentional wire crossings, and pins that land \
+             mid-wire.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "schematic": { "type": "string", "description": "Path to .kicad_sch file" }
+                },
+                "required": ["schematic"]
+            }),
+            |args, ctx| async move { handle_normalize_junctions(args, ctx).await }
+        ),
+        tool!(
             "connect_to_net",
             "Connect a pin endpoint to a named net by adding a short wire stub and a net label.",
             json!({
@@ -1483,6 +1497,171 @@ async fn handle_batch_add_junction(
     Ok(CallToolResult::json(&json!({ "added": positions.len() })))
 }
 
+fn points_match(left: (f64, f64), right: (f64, f64)) -> bool {
+    konnect_sexp::geometry::points_coincident(left.0, left.1, right.0, right.1, 0.01)
+}
+
+fn required_junctions(tree: &konnect_sexp::SexpNode) -> Vec<(f64, f64)> {
+    use konnect_sexp::geometry::point_on_segment;
+    use konnect_sexp::schematic::extract_junctions;
+
+    let wires = extract_wires(tree);
+    let existing = extract_junctions(tree);
+    let mut required = find_t_junctions(&wires, 0.01);
+
+    // Three or more wire segments sharing an endpoint form a visible branch
+    // junction even though no endpoint lies inside another segment.
+    let endpoints: Vec<(f64, f64)> = wires
+        .iter()
+        .flat_map(|wire| [(wire.x1, wire.y1), (wire.x2, wire.y2)])
+        .collect();
+    for endpoint in endpoints {
+        let touching = wires
+            .iter()
+            .filter(|wire| {
+                points_match(endpoint, (wire.x1, wire.y1))
+                    || points_match(endpoint, (wire.x2, wire.y2))
+            })
+            .count();
+        if touching >= 3
+            && !required
+                .iter()
+                .copied()
+                .any(|point| points_match(point, endpoint))
+        {
+            required.push(endpoint);
+        }
+    }
+
+    for pin in crate::tools::all_pin_endpoints(tree) {
+        if wires.iter().any(|wire| {
+            point_on_segment(pin.0, pin.1, wire.x1, wire.y1, wire.x2, wire.y2, 0.01)
+                && !points_match(pin, (wire.x1, wire.y1))
+                && !points_match(pin, (wire.x2, wire.y2))
+        }) && !required
+            .iter()
+            .copied()
+            .any(|point| points_match(point, pin))
+        {
+            required.push(pin);
+        }
+    }
+
+    // A dot at two wires crossing strictly inside both segments records the
+    // user's intent to connect them. Preserve that dot; synthesizing one at an
+    // unmarked crossing would silently merge two nets.
+    for junction in existing {
+        let interior_segments = wires
+            .iter()
+            .filter(|wire| {
+                point_on_segment(
+                    junction.0, junction.1, wire.x1, wire.y1, wire.x2, wire.y2, 0.01,
+                ) && !points_match(junction, (wire.x1, wire.y1))
+                    && !points_match(junction, (wire.x2, wire.y2))
+            })
+            .count();
+        if interior_segments >= 2
+            && !required
+                .iter()
+                .copied()
+                .any(|point| points_match(point, junction))
+        {
+            required.push(junction);
+        }
+    }
+
+    required.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then_with(|| left.1.total_cmp(&right.1))
+    });
+    required.dedup_by(|left, right| points_match(*left, *right));
+    required
+}
+
+fn prepare_junction_normalization(
+    content: &str,
+    tree: &konnect_sexp::SexpNode,
+) -> anyhow::Result<(Option<String>, usize, usize, usize)> {
+    let required = required_junctions(tree);
+    let mut satisfied = vec![false; required.len()];
+    let mut edits = Vec::new();
+    let mut removed = 0usize;
+    let mut retained = 0usize;
+
+    for (start, end) in find_direct_child_blocks(content, "kicad_sch") {
+        if !content[start..end].starts_with("(junction") {
+            continue;
+        }
+        let position = parse_sexp(&content[start..end])
+            .ok()
+            .and_then(|node| parse_at(&node));
+        let required_index = position.and_then(|(x, y, _)| {
+            required
+                .iter()
+                .position(|point| points_match(*point, (x, y)))
+        });
+        if let Some(index) = required_index.filter(|index| !satisfied[*index]) {
+            satisfied[index] = true;
+            retained += 1;
+        } else if let Some((delete_start, delete_end)) =
+            find_block_with_leading_whitespace(content, start)
+        {
+            edits.push(SexpEdit::delete(delete_start, delete_end));
+            removed += 1;
+        }
+    }
+
+    let missing: Vec<(f64, f64)> = required
+        .into_iter()
+        .zip(satisfied)
+        .filter_map(|(point, present)| (!present).then_some(point))
+        .collect();
+    let added = missing.len();
+    if edits.is_empty() && missing.is_empty() {
+        return Ok((None, 0, 0, retained));
+    }
+
+    let cleaned = apply_edits(content.to_string(), edits);
+    let additions = missing
+        .into_iter()
+        .map(|(x, y)| format_junction(x, y))
+        .collect::<String>();
+    let normalized = if additions.is_empty() {
+        cleaned
+    } else {
+        insert_before_close(&cleaned, &additions)
+    };
+    parse_sexp(&normalized)
+        .map_err(|error| anyhow::anyhow!("normalized schematic is invalid: {error}"))?;
+    Ok((Some(normalized), removed, added, retained))
+}
+
+async fn handle_normalize_junctions(
+    args: &serde_json::Value,
+    _ctx: &ToolContext,
+) -> anyhow::Result<CallToolResult> {
+    let sch_path = get_path(args, "schematic")?;
+    let (expected, tree) = read_schematic(&sch_path)?;
+    let (normalized, removed, added, retained) = prepare_junction_normalization(&expected, &tree)?;
+    let Some(normalized) = normalized else {
+        return Ok(CallToolResult::json(&json!({
+            "changed": false,
+            "removed": 0,
+            "added": 0,
+            "retained": retained
+        })));
+    };
+    write_atomic_if_unchanged(&sch_path, &expected, &normalized)?;
+
+    Ok(CallToolResult::json(&json!({
+        "changed": true,
+        "removed": removed,
+        "added": added,
+        "retained": retained
+    })))
+}
+
 async fn handle_connect_to_net(
     args: &serde_json::Value,
     _ctx: &ToolContext,
@@ -2257,6 +2436,78 @@ mod wire_delete_tests {
         assert_eq!(wires.len(), 2);
         assert!(after.contains("(junction"));
         assert!(!wires.iter().any(|wire| wire.x1 == 0.0 && wire.x2 == 10.0));
+    }
+}
+
+#[cfg(test)]
+mod junction_normalization_tests {
+    use super::*;
+    use crate::router::ToolRouter;
+    use crate::tools::ServerConfig;
+    use std::sync::Arc;
+
+    fn test_ctx() -> ToolContext {
+        ToolContext::new(
+            ServerConfig {
+                kicad_cli: String::new(),
+                kicad_binary: String::new(),
+                ipc_address: String::new(),
+                project_dir: None,
+                jlcpcb_db_path: None,
+            },
+            Arc::new(ToolRouter::new()),
+        )
+    }
+
+    fn junction_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("junctions.kicad_sch");
+        std::fs::write(
+            &path,
+            "(kicad_sch\n  (version 20260306)\n  (generator \"eeschema\")\n  (uuid \"root\")\n  (lib_symbols\n    (symbol \"reviewed:PART\"\n      (symbol \"PART_1_1\"\n        (pin input line (at 0 0 0) (length 2.54) (name \"A\") (number \"1\"))\n      )\n    )\n  )\n  (symbol (lib_id \"reviewed:PART\") (at 5 0 0) (unit 1) (uuid \"instance\") (property \"Reference\" \"U1\" (at 5 -2 0)))\n  (wire (pts (xy 0 0) (xy 10 0)) (uuid \"horizontal\"))\n  (wire (pts (xy 3 0) (xy 3 3)) (uuid \"tee\"))\n  (wire (pts (xy 7 -2) (xy 7 2)) (uuid \"crossing\"))\n  (wire (pts (xy 20 0) (xy 21 0)) (uuid \"branch-a\"))\n  (wire (pts (xy 20 0) (xy 20 1)) (uuid \"branch-b\"))\n  (wire (pts (xy 20 0) (xy 19 0)) (uuid \"branch-c\"))\n  (junction (at 5 0) (diameter 0) (uuid \"pin-kept\"))\n  (junction (at 5 0) (diameter 0) (uuid \"pin-duplicate\"))\n  (junction (at 7 0) (diameter 0) (uuid \"crossing-kept\"))\n  (junction (at 20 0) (diameter 0) (uuid \"branch-kept\"))\n  (junction (at 9 9) (diameter 0) (uuid \"stale\"))\n)\n",
+        )
+        .unwrap();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn normalize_junctions_preserves_pin_midwire_and_marked_crossing_and_is_idempotent() {
+        let (_dir, path) = junction_fixture();
+        let args = json!({ "schematic": path.display().to_string() });
+        let first = handle_normalize_junctions(&args, &test_ctx())
+            .await
+            .unwrap();
+        assert!(!first.is_error, "{first:?}");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after.matches("(junction").count(), 4);
+        assert!(after.contains("pin-kept"), "mid-wire pin junction was lost");
+        assert!(after.contains("crossing-kept"), "marked crossing was lost");
+        assert!(after.contains("branch-kept"), "three-way branch was lost");
+        assert!(!after.contains("pin-duplicate"));
+        assert!(!after.contains("stale"));
+        assert!(after.contains("(at 3 0)"), "missing T-junction");
+
+        let second = handle_normalize_junctions(&args, &test_ctx())
+            .await
+            .unwrap();
+        assert!(!second.is_error, "{second:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
+    }
+
+    #[test]
+    fn normalize_junctions_rejects_malformed_input_and_conflicts_after_external_change() {
+        let (_dir, path) = junction_fixture();
+        let (expected, tree) = read_schematic(&path).unwrap();
+        let (replacement, _, _, _) = prepare_junction_normalization(&expected, &tree).unwrap();
+        let replacement = replacement.unwrap();
+        std::fs::write(&path, "external edit").unwrap();
+        assert!(write_atomic_if_unchanged(&path, &expected, &replacement).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
+
+        std::fs::write(&path, "(kicad_sch (wire").unwrap();
+        assert!(read_schematic(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "(kicad_sch (wire");
     }
 }
 
